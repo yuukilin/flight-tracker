@@ -246,7 +246,10 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn):
                     except Exception:
                         continue
 
-                    airline = getattr(f, 'name', '') or ''
+                    airline = (getattr(f, 'name', '') or '').strip()
+                    # 跳過 fast-flights 沒解析出航空公司名稱的航班（資料不完整，不可信）
+                    if not airline:
+                        continue
                     airline_code = airline[:2].upper() if airline else ''
                     is_lcc = is_lcc_flight(airline, airline_code, lcc_codes, lcc_keywords)
 
@@ -303,6 +306,12 @@ def reclassify_is_lcc(conn, lcc_codes, lcc_keywords):
     conn.commit()
     log.info(f"重新分類 is_lcc：{changed} / {len(rows)} 筆有變更")
 
+def cleanup_invalid_rows(conn):
+    """清掉 airline_name 空白的舊資料（資料不完整、不可信）"""
+    cur = conn.execute("DELETE FROM prices WHERE airline_name IS NULL OR TRIM(airline_name) = ''")
+    log.info(f"清除空白 airline 舊資料：{cur.rowcount} 筆")
+    conn.commit()
+
 def main():
     log.info("=" * 60)
     log.info("機票爬蟲開始")
@@ -312,7 +321,8 @@ def main():
     lcc_codes, lcc_keywords = load_lcc_config()
     conn = init_db()
 
-    # 先把歷史資料的 is_lcc 用目前 LCC 名單重跑一次（修補舊 bug 留下的錯誤分類）
+    # 維護：清掉空白 airline 的舊資料，並重跑 is_lcc 分類
+    cleanup_invalid_rows(conn)
     reclassify_is_lcc(conn, lcc_codes, lcc_keywords)
 
     total = 0
