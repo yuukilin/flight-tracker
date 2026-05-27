@@ -1,42 +1,70 @@
-# 廉航排除名單（IATA 兩碼）
-# 在這名單上的航空公司會被標註為 LCC，不納入歷史比較
-# 想恢復追蹤某家，把它從這檔移掉即可
+# 廉航排除名單
+# 偵測方式有兩種：
+# (1) iata_codes：IATA 兩碼比對
+# (2) name_keywords：航空公司名稱包含關鍵字（不分大小寫）
+# 任一條件命中就標註為 LCC
 
-# 亞洲
-asia:
+iata_codes:
+  # 亞洲
   - MM   # 樂桃 Peach
-  - IT   # 台灣虎航
+  - IT   # 台灣虎航 Tigerair Taiwan
   - TR   # 酷航 Scoot
   - JQ   # 捷星 Jetstar
-  - AK   # 亞航 AirAsia (短程)
-  - D7   # 亞航長程 AirAsia X
-  - 5J   # 宿霧太平洋 Cebu Pacific
+  - AK   # 亞航 AirAsia
+  - D7   # 亞航長程
+  - 5J   # 宿霧太平洋
   - VJ   # 越捷 Vietjet
-  - Z2   # 亞航菲律賓 AirAsia Philippines
-  - BL   # 捷星太平洋
+  - Z2   # 亞航菲律賓
   - DD   # Nok Air
   - SL   # Thai Lion Air
-
-# 歐洲
-europe:
+  # 歐洲
   - FR   # Ryanair
   - U2   # easyJet
   - W6   # Wizz Air
   - VY   # Vueling
   - PC   # Pegasus
   - DY   # Norwegian
-
-# 美洲
-americas:
+  # 美洲
   - NK   # Spirit
   - F9   # Frontier
   - G4   # Allegiant
-  - WN   # Southwest（半 LCC，可自行決定）
-
-# 中東 / 印度
-me_india:
+  - WN   # Southwest
+  # 中東 / 印度
   - FZ   # flydubai
   - G9   # Air Arabia
   - 6E   # IndiGo
   - SG   # SpiceJet
   - IX   # Air India Express
+
+name_keywords:
+  # 用小寫，scrape.py 會 .lower() 後比對
+  - tigerair
+  - peach
+  - scoot
+  - jetstar
+  - airasia
+  - air asia
+  - cebu
+  - vietjet
+  - nok air
+  - nokair
+  - lion air
+  - lionair
+  - ryanair
+  - easyjet
+  - wizz
+  - vueling
+  - pegasus
+  - norwegian
+  - spirit
+  - frontier
+  - allegiant
+  - southwest
+  - flydubai
+  - fly dubai
+  - air arabia
+  - indigo
+  - spicejet
+  - spice jet
+  - air india express
+  - lcc

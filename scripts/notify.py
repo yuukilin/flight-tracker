@@ -47,17 +47,20 @@ def should_notify(threshold, status):
     st = {'cheap': 0, 'good': 1, 'normal': 2}.get(status, 99)
     return st <= th
 
-def get_top_flights(route_id, today_str, limit=3):
+def get_top_flights(route_id, today_str, is_lcc, limit=3):
+    """取當天該路線的便宜航班 Top N。is_lcc=0 拿傳統，is_lcc=1 拿廉航
+    用 GROUP BY 去重複（同航空、同日期、同價格只算一次）"""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute("""
-        SELECT airline_name, depart_date, return_date, price_twd, depart_time, stops, destination
+        SELECT airline_name, depart_date, return_date, MIN(price_twd) as p, MIN(depart_time), MIN(stops), destination
         FROM prices
         WHERE route_id = ?
           AND DATE(scan_ts) = ?
-          AND is_lcc = 0
-        ORDER BY price_twd ASC
+          AND is_lcc = ?
+        GROUP BY airline_name, depart_date, return_date, destination
+        ORDER BY p ASC
         LIMIT ?
-    """, (route_id, today_str, limit))
+    """, (route_id, today_str, is_lcc, limit))
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -72,6 +75,18 @@ def format_message(analyses, routes):
         if not route:
             continue
         if a.get('today_min') is None:
+            # 沒有傳統航空資料，看是否有廉航可列
+            lcc_top = get_top_flights(a['route_id'], today.isoformat(), is_lcc=1)
+            if not lcc_top:
+                continue
+            has_notify = True
+            lines.append("━━━━━━━━━━━━━━━━━")
+            lines.append(f"📍 {a['route_name']}")
+            lines.append("⚠️ 今日無傳統航空資料，僅有廉航：")
+            for i, (name, dd, rd, price, dt, stops, dest) in enumerate(lcc_top, 1):
+                stops_str = "直飛" if stops == 0 else f"轉 {stops} 次"
+                lines.append(f"  {i}. {name or '?'}（{dd}→{rd}，{stops_str}）NT$ {price:,}  ⚠ 未含行李費")
+            lines.append("")
             continue
 
         analysis = a.get('analysis_90') or a.get('analysis_30') or ['insufficient_data', '']
@@ -85,17 +100,28 @@ def format_message(analyses, routes):
         emoji = STATUS_EMOJI.get(status, '⚪')
         lines.append("━━━━━━━━━━━━━━━━━")
         lines.append(f"📍 {a['route_name']}")
-        lines.append(f"💰 今日最低：NT$ {a['today_min']:,}")
+        lines.append(f"💰 今日最低（傳統航空）：NT$ {a['today_min']:,}")
         lines.append(f"📊 {emoji}（{reason}）")
         lines.append(f"📈 樣本：30天 {a['history_count_30']} / 90天 {a['history_count_90']} / 365天 {a['history_count_365']}")
 
-        top = get_top_flights(a['route_id'], today.isoformat())
+        # 傳統航空 Top 3
+        top = get_top_flights(a['route_id'], today.isoformat(), is_lcc=0)
         if top:
             lines.append("")
-            lines.append("🛫 最便宜選項：")
+            lines.append("🛫 傳統航空最便宜：")
             for i, (name, dd, rd, price, dt, stops, dest) in enumerate(top, 1):
                 stops_str = "直飛" if stops == 0 else f"轉 {stops} 次"
                 lines.append(f"  {i}. {name or '?'}（{dd}→{rd}，{stops_str}）NT$ {price:,}")
+
+        # 廉航僅供參考
+        lcc_top = get_top_flights(a['route_id'], today.isoformat(), is_lcc=1, limit=2)
+        if lcc_top:
+            lines.append("")
+            lines.append("⚠️ 廉航（未含行李費，僅供參考）：")
+            for i, (name, dd, rd, price, dt, stops, dest) in enumerate(lcc_top, 1):
+                stops_str = "直飛" if stops == 0 else f"轉 {stops} 次"
+                lines.append(f"  {i}. {name or '?'}（{dd}→{rd}，{stops_str}）NT$ {price:,}")
+
         lines.append("")
 
     if not has_notify:

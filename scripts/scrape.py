@@ -37,13 +37,31 @@ def load_routes():
     with open(ROUTES_YAML, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
-def load_lcc_codes():
+def load_lcc_config():
+    """讀廉航設定。回傳 (iata_codes set, name_keywords list)"""
     with open(LCC_YAML, 'r', encoding='utf-8') as f:
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(f) or {}
     codes = set()
-    for region_airlines in data.values():
-        codes.update(region_airlines)
-    return codes
+    keywords = []
+    # 新格式：頂層有 iata_codes 和 name_keywords
+    if 'iata_codes' in data or 'name_keywords' in data:
+        codes = set(data.get('iata_codes') or [])
+        keywords = [k.lower() for k in (data.get('name_keywords') or [])]
+    else:
+        # 舊格式：每個 region key 都是 list
+        for v in data.values():
+            if isinstance(v, list):
+                codes.update(v)
+    return codes, keywords
+
+def is_lcc_flight(airline_name, airline_code, lcc_codes, lcc_keywords):
+    if airline_code and airline_code in lcc_codes:
+        return True
+    if airline_name:
+        name_lower = airline_name.lower()
+        if any(kw in name_lower for kw in lcc_keywords):
+            return True
+    return False
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +202,7 @@ def query_one(origin, dest, depart_date, return_date, cabin):
 
 # ─────────── 主流程 ───────────
 
-def scrape_route(route, lcc_codes, conn):
+def scrape_route(route, lcc_codes, lcc_keywords, conn):
     if not route.get('active', True):
         log.info(f"路線 #{route['id']} 已暫停，跳過")
         return 0
@@ -230,7 +248,7 @@ def scrape_route(route, lcc_codes, conn):
 
                     airline = getattr(f, 'name', '') or ''
                     airline_code = airline[:2].upper() if airline else ''
-                    is_lcc = airline_code in lcc_codes
+                    is_lcc = is_lcc_flight(airline, airline_code, lcc_codes, lcc_keywords)
 
                     depart_time_str = getattr(f, 'departure', '') or ''
                     arrive_time_str = getattr(f, 'arrival', '') or ''
@@ -279,12 +297,12 @@ def main():
     log.info("=" * 60)
 
     routes_data = load_routes()
-    lcc_codes = load_lcc_codes()
+    lcc_codes, lcc_keywords = load_lcc_config()
     conn = init_db()
 
     total = 0
     for route in routes_data['routes']:
-        total += scrape_route(route, lcc_codes, conn)
+        total += scrape_route(route, lcc_codes, lcc_keywords, conn)
 
     conn.close()
     log.info(f"全部完成，共寫入 {total} 筆")
