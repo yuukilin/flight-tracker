@@ -234,7 +234,18 @@ def scrape_route(route, lcc_codes, conn):
 
                     depart_time_str = getattr(f, 'departure', '') or ''
                     arrive_time_str = getattr(f, 'arrival', '') or ''
-                    stops = getattr(f, 'stops', 0) or 0
+
+                    # fast-flights 的 stops 可能是 int、"Nonstop"、"1 stop"、"2 stops" 等
+                    stops_raw = getattr(f, 'stops', 0)
+                    if isinstance(stops_raw, int):
+                        stops = stops_raw
+                    else:
+                        s = str(stops_raw or '').lower()
+                        if 'nonstop' in s or 'direct' in s:
+                            stops = 0
+                        else:
+                            digits = ''.join(c for c in s if c.isdigit())
+                            stops = int(digits) if digits else 0
 
                     if stops > max_stops:
                         continue
