@@ -1,0 +1,42 @@
+# 廉航排除名單（IATA 兩碼）
+# 在這名單上的航空公司會被標註為 LCC，不納入歷史比較
+# 想恢復追蹤某家，把它從這檔移掉即可
+
+# 亞洲
+asia:
+  - MM   # 樂桃 Peach
+  - IT   # 台灣虎航
+  - TR   # 酷航 Scoot
+  - JQ   # 捷星 Jetstar
+  - AK   # 亞航 AirAsia (短程)
+  - D7   # 亞航長程 AirAsia X
+  - 5J   # 宿霧太平洋 Cebu Pacific
+  - VJ   # 越捷 Vietjet
+  - Z2   # 亞航菲律賓 AirAsia Philippines
+  - BL   # 捷星太平洋
+  - DD   # Nok Air
+  - SL   # Thai Lion Air
+
+# 歐洲
+europe:
+  - FR   # Ryanair
+  - U2   # easyJet
+  - W6   # Wizz Air
+  - VY   # Vueling
+  - PC   # Pegasus
+  - DY   # Norwegian
+
+# 美洲
+americas:
+  - NK   # Spirit
+  - F9   # Frontier
+  - G4   # Allegiant
+  - WN   # Southwest（半 LCC，可自行決定）
+
+# 中東 / 印度
+me_india:
+  - FZ   # flydubai
+  - G9   # Air Arabia
+  - 6E   # IndiGo
+  - SG   # SpiceJet
+  - IX   # Air India Express

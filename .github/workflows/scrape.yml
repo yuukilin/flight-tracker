@@ -1,0 +1,49 @@
+name: Flight Price Scrape
+
+on:
+  schedule:
+    # 台灣時間 09:00 = UTC 01:00
+    - cron: '0 1 * * *'
+    # 台灣時間 21:00 = UTC 13:00
+    - cron: '0 13 * * *'
+  workflow_dispatch:    # 允許手動觸發（Cloudflare Worker 的 /scan 也走這條）
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run scrape
+        run: python scripts/scrape.py
+
+      - name: Run analyze
+        run: python scripts/analyze.py
+
+      - name: Send Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEND_HEARTBEAT: '1'
+        run: python scripts/notify.py
+
+      - name: Commit data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/ routes.json 2>/dev/null || true
+          git commit -m "Update prices: $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "Nothing to commit"
+          git push
