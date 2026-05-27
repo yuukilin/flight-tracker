@@ -291,6 +291,18 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn):
     log.info(f"  寫入 {written} 筆")
     return written
 
+def reclassify_is_lcc(conn, lcc_codes, lcc_keywords):
+    """重跑所有歷史資料的 is_lcc 分類，讓舊資料能跟著新 LCC 名單修正"""
+    rows = conn.execute('SELECT id, airline_name, airline_code, is_lcc FROM prices').fetchall()
+    changed = 0
+    for id_, name, code, old in rows:
+        new_val = int(is_lcc_flight(name or '', code or '', lcc_codes, lcc_keywords))
+        if new_val != old:
+            conn.execute('UPDATE prices SET is_lcc = ? WHERE id = ?', (new_val, id_))
+            changed += 1
+    conn.commit()
+    log.info(f"重新分類 is_lcc：{changed} / {len(rows)} 筆有變更")
+
 def main():
     log.info("=" * 60)
     log.info("機票爬蟲開始")
@@ -299,6 +311,9 @@ def main():
     routes_data = load_routes()
     lcc_codes, lcc_keywords = load_lcc_config()
     conn = init_db()
+
+    # 先把歷史資料的 is_lcc 用目前 LCC 名單重跑一次（修補舊 bug 留下的錯誤分類）
+    reclassify_is_lcc(conn, lcc_codes, lcc_keywords)
 
     total = 0
     for route in routes_data['routes']:
