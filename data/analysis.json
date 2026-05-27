@@ -2,7 +2,7 @@
   {
     "route_id": 1,
     "route_name": "測試：台北東京 5 天",
-    "today_min": 10816,
+    "today_min": 10944,
     "analysis_30": [
       "insufficient_data",
       "歷史資料只有 0 天，需 ≥ 7 天"
