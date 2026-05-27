@@ -17,6 +17,16 @@ iata_codes:
   - Z2   # 亞航菲律賓
   - DD   # Nok Air
   - SL   # Thai Lion Air
+  # 韓國廉航
+  - LJ   # 真航空 Jin Air
+  - 7C   # 濟州航空 Jeju Air
+  - TW   # T'Way 德威航空
+  - BX   # Air Busan 釜山航空
+  - ZE   # Eastar Jet 易斯達航空
+  - RS   # Air Seoul
+  # 香港 / 東南亞補充
+  - UO   # HK Express
+  - QZ   # Indonesia AirAsia
   # 歐洲
   - FR   # Ryanair
   - U2   # easyJet
@@ -50,6 +60,17 @@ name_keywords:
   - nokair
   - lion air
   - lionair
+  # 韓國廉航
+  - jin air
+  - jeju air
+  - t'way
+  - tway
+  - eastar
+  - air busan
+  - air seoul
+  # 香港
+  - hk express
+  - hong kong express
   - ryanair
   - easyjet
   - wizz
