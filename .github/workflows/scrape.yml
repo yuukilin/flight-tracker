@@ -11,8 +11,6 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout
@@ -27,6 +25,16 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      # ── 從 cache 還原上次的 SQLite（如果有的話）──
+      - name: Restore prices DB cache
+        id: restore-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/prices.db
+          key: prices-db-${{ github.run_id }}
+          restore-keys: |
+            prices-db-
+
       - name: Run scrape
         run: python scripts/scrape.py
 
@@ -40,11 +48,21 @@ jobs:
           SEND_HEARTBEAT: '1'
         run: python scripts/notify.py
 
-      - name: Commit data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/ || true
-          [ -f routes.json ] && git add routes.json || true
-          git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Update prices: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push
+      # ── 把新版 DB 存回 cache（永遠用 run_id 當 key，每次新增、舊的 LRU 自動清）──
+      - name: Save prices DB cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/prices.db
+          key: prices-db-${{ github.run_id }}
+
+      # ── 也上傳成 Artifact 作為備援，可以從 Actions 頁面下載 ──
+      - name: Upload DB artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prices-db-${{ github.run_id }}
+          path: |
+            data/prices.db
+            data/analysis.json
+          retention-days: 30

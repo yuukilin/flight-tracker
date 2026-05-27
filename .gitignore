@@ -5,3 +5,7 @@ __pycache__/
 node_modules/
 .wrangler/
 *.log
+
+# 資料檔不放 main，改由 Actions cache 管理（避免 Actions 自動 commit 跟本地 push 衝突）
+data/prices.db
+data/analysis.json
