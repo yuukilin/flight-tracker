@@ -2,8 +2,6 @@ name = "flight-bot"
 main = "src/index.js"
 compatibility_date = "2026-05-26"
 
-# KV 儲存對話狀態（/add 多輪對話用）
-# id 要在 wrangler kv namespace create STATE 後填入
 [[kv_namespaces]]
 binding = "STATE"
-id = ""
+id = "fd5c850c5cff4d74920dcb824c9cef15"
