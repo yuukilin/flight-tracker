@@ -163,6 +163,8 @@ const TIME_PRESET_TO_VAL = {
   '晚班 18-24': '18:00-23:59',
 };
 
+const TIME_EMPTY_RE = /^(skip|none|null|不限|不限制|不用限制)$/i;
+
 // ─── base64 ↔ UTF-8 ───
 function b64ToUtf8(b64) {
   const binary = atob(b64.replace(/\n/g, ''));
@@ -509,6 +511,14 @@ function parseDestinations(text) {
   return { codes: uniq, labels };
 }
 
+function parseOriginCode(text) {
+  const raw = String(text || '').trim();
+  const m = raw.match(/^([A-Za-z]{3})/);
+  if (m) return m[1].toUpperCase();
+  const parsed = parseDestinations(raw);
+  return parsed.codes[0];
+}
+
 function parseCabinClasses(text) {
   const aliases = {
     '經濟': 'economy',
@@ -622,12 +632,7 @@ const ADD_STEPS = [
     key: 'trip_duration_days',
     prompt: '大概要玩幾天？',
     keyboard: [['3', '5', '7'], ['9', '10', '14']],
-    parse: (v) => {
-      const digit = v.match(/\d+/);
-      if (digit) return parseInt(digit[0]);
-      const word = v.match(/[一二兩三四五六七八九十]+/);
-      return word ? parseChineseInteger(word[0]) : NaN;
-    },
+    parse: (v) => parseFirstInteger(v),
     validate: (v) => (Number.isFinite(v) && v >= 1 && v <= 90 ? null : '須為 1-90 整數'),
   },
   {
@@ -653,10 +658,8 @@ const ADD_STEPS = [
     prompt: '需不需要跨完整週末？',
     keyboard: [['不用限制週末'], ['至少 1 個週末'], ['至少 2 個週末']],
     parse: (v) => {
-      const m = v.match(/\d+/);
-      if (m) return parseInt(m[0]);
-      const word = v.match(/[一二兩三四五]/);
-      return word ? parseChineseInteger(word[0]) : 0;
+      const n = parseFirstInteger(v);
+      return Number.isFinite(n) ? n : 0;
     },
     validate: (v) => (v >= 0 && v <= 5 ? null : '須為 0-5'),
   },
@@ -732,6 +735,13 @@ function parseChineseInteger(text) {
     return tens * 10 + ones;
   }
   return NaN;
+}
+
+function parseFirstInteger(text) {
+  const digit = String(text || '').match(/\d+/);
+  if (digit) return parseInt(digit[0]);
+  const word = String(text || '').match(/[一二兩三四五六七八九十]+/);
+  return word ? parseChineseInteger(word[0]) : NaN;
 }
 
 function findAirportMentions(text) {
@@ -1075,6 +1085,24 @@ function parseNaturalAddSentence(raw, force = false) {
   return { ok: true, data, missing, notes };
 }
 
+function parseRouteDateRangeEdit(text) {
+  const raw = String(text || '').trim();
+  const exact = raw.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
+  if (exact.length === 2 && isDate(exact[0]) && isDate(exact[1])) {
+    return { start: exact[0], end: exact[1], label: `${exact[0]} 到 ${exact[1]}` };
+  }
+  return parseFlexibleDateRange(raw);
+}
+
+function parseBudgetTwd(text) {
+  const compact = compactUserText(text).replace(/,/g, '');
+  if (/^(不限|不限制|無上限|0)$/.test(compact)) return 0;
+  const fromSentence = extractMaxPriceTwd(`預算${compact}`);
+  if (fromSentence !== undefined) return fromSentence;
+  const m = compact.match(/\d+/);
+  return m ? parseInt(m[0]) : 0;
+}
+
 function formatRouteSummary(r) {
   const cabins = (r.cabin_classes || []).map((c) => CABIN_VAL_TO_LABEL[c] || c).join(', ');
   const dests = (r.destinations || []).join(', ');
@@ -1239,8 +1267,14 @@ async function cmdClone(env, chatId, id) {
 const EDIT_FIELD_HANDLERS = {
   name: { apply: (r, v) => { r.name = v; }, validate: (v) => (v.length > 0 && v.length <= 50 ? null : '名稱需 1-50 字') },
   origin: {
-    apply: (r, v) => { r.origin = v.toUpperCase(); },
-    validate: (v) => (isIata(v.toUpperCase()) ? null : '須為 3 字母 IATA 代碼'),
+    apply: (r, v) => { r.origin = parseOriginCode(v); },
+    validate: (v) => {
+      try {
+        return isIata(parseOriginCode(v)) ? null : '須為 3 字母 IATA 代碼';
+      } catch (e) {
+        return e.message;
+      }
+    },
   },
   destinations: {
     apply: (r, v) => {
@@ -1264,73 +1298,84 @@ const EDIT_FIELD_HANDLERS = {
   },
   dates: {
     apply: (r, v) => {
-      const [s, e] = v.split(/[,，]/).map((x) => x.trim());
-      r.depart_date_range = { start: s, end: e };
+      const parsed = parseRouteDateRangeEdit(v);
+      r.depart_date_range = { start: parsed.start, end: parsed.end };
     },
     validate: (v) => {
-      const [s, e] = v.split(/[,，]/).map((x) => x.trim());
-      if (!s || !e) return '格式：YYYY-MM-DD,YYYY-MM-DD';
-      if (!isDate(s) || !isDate(e)) return '日期格式須為 YYYY-MM-DD';
-      if (s > e) return '開始日期需早於結束日期';
+      let parsed;
+      try {
+        parsed = parseRouteDateRangeEdit(v);
+      } catch (e) {
+        return e.message;
+      }
+      if (!parsed.start || !parsed.end) return '請給一段日期';
+      if (!isDate(parsed.start) || !isDate(parsed.end)) return '日期格式不正確';
+      if (parsed.start > parsed.end) return '開始日期需早於結束日期';
+      const today = taipeiTodayIso();
+      if (parsed.end < today) return '這段日期已經過了，請選未來日期';
+      if (parsed.start < today) return `開始日期已經過了，請從 ${today} 之後開始`;
       return null;
     },
   },
   duration: {
-    apply: (r, v) => { r.trip_duration_days = parseInt(v); },
+    apply: (r, v) => { r.trip_duration_days = parseFirstInteger(v); },
     validate: (v) => {
-      const n = parseInt(v);
+      const n = parseFirstInteger(v);
       return n >= 1 && n <= 90 ? null : '須為 1-90 整數';
     },
   },
   weekends: {
-    apply: (r, v) => { r.must_contain_full_weekends = parseInt(v) || 0; },
+    apply: (r, v) => {
+      const n = parseFirstInteger(v);
+      r.must_contain_full_weekends = Number.isFinite(n) ? n : 0;
+    },
     validate: (v) => {
-      const n = parseInt(v) || 0;
-      return n >= 0 && n <= 5 ? null : '須為 0-5';
+      const n = parseFirstInteger(v);
+      const out = Number.isFinite(n) ? n : 0;
+      return out >= 0 && out <= 5 ? null : '須為 0-5';
     },
   },
   max_price: {
     apply: (r, v) => {
-      const m = v.match(/\d+/);
-      r.max_price_twd = m ? parseInt(m[0]) : 0;
+      r.max_price_twd = parseBudgetTwd(v);
     },
     validate: () => null,
   },
   max_stops: {
     apply: (r, v) => {
-      const m = v.match(/\d+/);
-      r.max_stops = m ? parseInt(m[0]) : 0;
+      const n = parseFirstInteger(v);
+      r.max_stops = Number.isFinite(n) ? n : 0;
     },
     validate: (v) => {
-      const m = v.match(/\d+/);
-      const n = m ? parseInt(m[0]) : 0;
-      return n >= 0 && n <= 3 ? null : '須為 0-3';
+      const n = parseFirstInteger(v);
+      const out = Number.isFinite(n) ? n : 0;
+      return out >= 0 && out <= 3 ? null : '須為 0-3';
     },
   },
   depart_time: {
     apply: (r, v) => {
-      if (/^skip|none|null$/i.test(v)) {
+      if (TIME_EMPTY_RE.test(v)) {
         r.depart_time_window = null;
       } else {
         r.depart_time_window = TIME_PRESET_TO_VAL[v] || v.trim();
       }
     },
     validate: (v) => {
-      if (/^skip|none|null$/i.test(v)) return null;
+      if (TIME_EMPTY_RE.test(v)) return null;
       const out = TIME_PRESET_TO_VAL[v] || v.trim();
       return isTimeWindow(out) ? null : '格式須為 HH:MM-HH:MM 或 skip';
     },
   },
   return_time: {
     apply: (r, v) => {
-      if (/^skip|none|null$/i.test(v)) {
+      if (TIME_EMPTY_RE.test(v)) {
         r.return_time_window = null;
       } else {
         r.return_time_window = TIME_PRESET_TO_VAL[v] || v.trim();
       }
     },
     validate: (v) => {
-      if (/^skip|none|null$/i.test(v)) return null;
+      if (TIME_EMPTY_RE.test(v)) return null;
       const out = TIME_PRESET_TO_VAL[v] || v.trim();
       return isTimeWindow(out) ? null : '格式須為 HH:MM-HH:MM 或 skip';
     },
@@ -1340,6 +1385,124 @@ const EDIT_FIELD_HANDLERS = {
     validate: (v) => (['cheap', 'good', 'any'].includes(v.toLowerCase()) ? null : '須為 cheap / good / any'),
   },
 };
+
+const EDIT_ROUTE_FIELDS = [
+  {
+    field: 'destinations',
+    label: '改目的地',
+    prompt: `新的目的地？
+
+可以輸入城市名或機場代碼。
+例：札幌、東京、NRT HND`,
+    keyboard: [
+      ['東京', '大阪', '札幌'],
+      ['沖繩', '福岡', '首爾'],
+      ['曼谷', '香港', '新加坡'],
+    ],
+  },
+  {
+    field: 'origin',
+    label: '改出發地',
+    prompt: '新的出發地？可輸入台北、高雄、TPE、KHH。',
+    keyboard: [
+      ['台北', 'TPE 桃園', 'TSA 松山'],
+      ['高雄', 'KHH 高雄', 'RMQ 台中'],
+    ],
+  },
+  {
+    field: 'dates',
+    label: '改日期',
+    prompt: `新的出發日期範圍？
+
+可輸入：
+10/1-12/31
+10月到12月
+明年10月到12月
+賞楓 / 寒假 / 暑假 / 跨年`,
+    keyboard: [
+      ['未來 3 個月', '未來半年'],
+      ['暑假', '寒假'],
+      ['賞楓', '跨年'],
+    ],
+  },
+  {
+    field: 'duration',
+    label: '改天數',
+    prompt: '新的旅遊天數？例：9、九天、14 天。',
+    keyboard: [['3', '5', '7'], ['9', '10', '14']],
+  },
+  {
+    field: 'cabin',
+    label: '改艙等',
+    prompt: '新的艙等？',
+    keyboard: [
+      ['經濟艙', '豪華經濟'],
+      ['商務艙', '頭等艙'],
+    ],
+  },
+  {
+    field: 'weekends',
+    label: '改週末',
+    prompt: '需要含幾個完整週末？',
+    keyboard: [['不用限制週末'], ['至少 1 個週末'], ['至少 2 個週末']],
+  },
+  {
+    field: 'max_stops',
+    label: '改轉機',
+    prompt: '最多可轉機幾次？',
+    keyboard: [['直飛'], ['最多 1 次'], ['最多 2 次']],
+  },
+  {
+    field: 'max_price',
+    label: '改預算',
+    prompt: '票價上限？可輸入「不限」、35000、3萬5。',
+    keyboard: [['不限'], ['30000', '40000'], ['50000', '60000']],
+  },
+  {
+    field: 'depart_time',
+    label: '改去程時段',
+    prompt: '去程出發時段？可選預設或輸入 HH:MM-HH:MM。',
+    keyboard: [['不限'], ['早班 06-12'], ['午班 12-18'], ['晚班 18-24']],
+  },
+  {
+    field: 'return_time',
+    label: '改回程時段',
+    prompt: '回程出發時段？可選預設或輸入 HH:MM-HH:MM。',
+    keyboard: [['不限'], ['早班 06-12'], ['午班 12-18'], ['晚班 18-24']],
+  },
+  {
+    field: 'threshold',
+    label: '改通知',
+    prompt: '什麼情況通知？',
+    keyboard: [
+      ['便宜才通知 cheap'],
+      ['不錯就通知 good'],
+      ['每次都通知 any'],
+    ],
+  },
+  {
+    field: 'name',
+    label: '改名稱',
+    prompt: '新的路線名稱？例：北海道豪經 9 天。',
+    keyboard: null,
+  },
+];
+
+const EDIT_FIELD_LABELS = Object.fromEntries(
+  EDIT_ROUTE_FIELDS.map((item) => [item.field, item.label.replace(/^改/, '')])
+);
+
+function findEditRouteField(field) {
+  return EDIT_ROUTE_FIELDS.find((item) => item.field === field);
+}
+
+function applyRouteEditValue(route, field, value) {
+  const handler = EDIT_FIELD_HANDLERS[field];
+  if (!handler) throw new Error(`不認識的欄位：${field}`);
+  const err = handler.validate(value);
+  if (err) throw new Error(err);
+  handler.apply(route, value);
+}
 
 async function cmdEdit(env, chatId, id, field, value) {
   if (isNaN(id) || !field || !value) {
@@ -1351,14 +1514,11 @@ async function cmdEdit(env, chatId, id, field, value) {
     const list = Object.keys(EDIT_FIELD_HANDLERS).join(' / ');
     return sendMsg(env, chatId, `不認識的欄位：${field}\n支援：${list}`);
   }
-  const err = handler.validate(value);
-  if (err) return sendMsg(env, chatId, `❌ ${err}`);
-
   const { data, sha } = await loadRoutes(env);
   const r = data.routes.find((x) => x.id === id);
   if (!r) return sendMsg(env, chatId, `找不到 #${id}`);
   try {
-    handler.apply(r, value);
+    applyRouteEditValue(r, field, value);
   } catch (e) {
     return sendMsg(env, chatId, `❌ ${e.message}`);
   }
@@ -1423,11 +1583,47 @@ function routeButtons(route) {
     ],
     [
       activeButton,
-      { text: '改通知', callback_data: `threshold:${id}` },
+      { text: '修改設定', callback_data: `edit_route:${id}` },
     ],
     [
+      { text: '改通知', callback_data: `threshold:${id}` },
       { text: '複製路線', callback_data: `clone:${id}` },
+    ],
+    [
       { text: '刪除', callback_data: `remove:${id}` },
+    ],
+  ]);
+}
+
+function routeEditButtons(route) {
+  const id = route.id;
+  return inlineKbOpts([
+    [
+      { text: '改目的地', callback_data: `edit_field:${id}:destinations` },
+      { text: '改日期', callback_data: `edit_field:${id}:dates` },
+    ],
+    [
+      { text: '改天數', callback_data: `edit_field:${id}:duration` },
+      { text: '改艙等', callback_data: `edit_field:${id}:cabin` },
+    ],
+    [
+      { text: '改週末', callback_data: `edit_field:${id}:weekends` },
+      { text: '改轉機', callback_data: `edit_field:${id}:max_stops` },
+    ],
+    [
+      { text: '改預算', callback_data: `edit_field:${id}:max_price` },
+      { text: '改通知', callback_data: `edit_field:${id}:threshold` },
+    ],
+    [
+      { text: '改出發地', callback_data: `edit_field:${id}:origin` },
+      { text: '改名稱', callback_data: `edit_field:${id}:name` },
+    ],
+    [
+      { text: '改去程時段', callback_data: `edit_field:${id}:depart_time` },
+      { text: '改回程時段', callback_data: `edit_field:${id}:return_time` },
+    ],
+    [
+      { text: '回路線面板', callback_data: `route:${id}` },
     ],
   ]);
 }
@@ -1452,6 +1648,63 @@ async function sendRoutePicker(env, chatId, action) {
   return sendMsg(env, chatId, title, inlineKbOpts(rows));
 }
 
+function formatEditCurrentValue(route, field) {
+  if (field === 'destinations') return (route.destinations || []).join(', ') || '未設定';
+  if (field === 'origin') return route.origin || '未設定';
+  if (field === 'dates') {
+    return `${route.depart_date_range?.start || '?'} ~ ${route.depart_date_range?.end || '?'}`;
+  }
+  if (field === 'duration') return `${route.trip_duration_days || '?'} 天`;
+  if (field === 'cabin') {
+    return (route.cabin_classes || []).map((c) => CABIN_VAL_TO_LABEL[c] || c).join(', ') || '未設定';
+  }
+  if (field === 'weekends') return `${route.must_contain_full_weekends || 0} 個完整週末`;
+  if (field === 'max_stops') return `最多 ${route.max_stops ?? 0} 次`;
+  if (field === 'max_price') return route.max_price_twd ? `NT$ ${route.max_price_twd.toLocaleString()}` : '不限';
+  if (field === 'depart_time') return route.depart_time_window || '不限';
+  if (field === 'return_time') return route.return_time_window || '不限';
+  if (field === 'threshold') return route.notify_threshold || '未設定';
+  if (field === 'name') return route.name || '未設定';
+  return '未設定';
+}
+
+function routeEditFieldOpts(choice) {
+  if (!choice?.keyboard) return kbOpts([['取消修改']]);
+  return kbOpts([...choice.keyboard, ['取消修改']]);
+}
+
+async function cmdRouteEditMenu(env, chatId, id, messageId = null) {
+  if (isNaN(id)) return sendMsg(env, chatId, '找不到這條路線');
+  const { data } = await loadRoutes(env);
+  const route = data.routes.find((x) => x.id === id);
+  if (!route) return sendMsg(env, chatId, `找不到 #${id}`);
+  const text = `要修改 #${id} 哪個設定？\n\n${formatRouteSummary(route)}`;
+  if (messageId) {
+    const edited = await editMsg(env, chatId, messageId, text, routeEditButtons(route));
+    if (edited?.ok) return;
+  }
+  return sendMsg(env, chatId, text, routeEditButtons(route));
+}
+
+async function startRouteEditField(env, chatId, id, field) {
+  const choice = findEditRouteField(field);
+  if (!choice) return sendMsg(env, chatId, '找不到這個設定項目，請重新打開路線面板。');
+  const { data } = await loadRoutes(env);
+  const route = data.routes.find((x) => x.id === id);
+  if (!route) return sendMsg(env, chatId, `找不到 #${id}`);
+  await env.STATE.put(
+    `dlg:${chatId}`,
+    JSON.stringify({ flow: 'edit_route_field', routeId: id, field }),
+    { expirationTtl: 1800 }
+  );
+  return sendMsg(
+    env,
+    chatId,
+    `目前${choice.label.replace(/^改/, '')}：${formatEditCurrentValue(route, field)}\n\n${choice.prompt}\n\n輸入 /cancel 或點「取消修改」可取消。`,
+    routeEditFieldOpts(choice)
+  );
+}
+
 async function handleCallback(env, cb) {
   const data = cb.data || '';
   const chatId = String(cb.message?.chat?.id || cb.from?.id || '');
@@ -1472,6 +1725,8 @@ async function handleCallback(env, cb) {
   if (action === 'pause') return cmdToggleActive(env, chatId, id, false);
   if (action === 'resume') return cmdToggleActive(env, chatId, id, true);
   if (action === 'clone') return cmdClone(env, chatId, id);
+  if (action === 'edit_route') return cmdRouteEditMenu(env, chatId, id, messageId);
+  if (action === 'edit_field') return startRouteEditField(env, chatId, id, rawValue);
   if (action === 'threshold') {
     return sendMsg(
       env,
@@ -1650,6 +1905,7 @@ async function handleFlow(env, chatId, text, state) {
   if (state.flow === 'add_confirm') return handleAddConfirm(env, chatId, text, state);
   if (state.flow === 'add_draft_edit') return handleAddDraftEdit(env, chatId, text, state);
   if (state.flow === 'add_draft_field') return handleAddDraftField(env, chatId, text, state);
+  if (state.flow === 'edit_route_field') return handleRouteEditField(env, chatId, text, state);
   await env.STATE.delete(`dlg:${chatId}`);
   await sendMsg(env, chatId, '未知對話狀態，已清除', removeKbOpts());
 }
@@ -1776,4 +2032,43 @@ async function handleAddDraftField(env, chatId, text, state) {
   state.flow = 'add_confirm';
   await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
   return sendAddConfirmPreview(env, chatId, state, `${parsed.extraNote}📋 已更新，請再確認：`);
+}
+
+async function handleRouteEditField(env, chatId, text, state) {
+  const id = Number(state.routeId);
+  if (/^\/cancel$|取消|cancel|取消修改|❌/i.test(text)) {
+    await env.STATE.delete(`dlg:${chatId}`);
+    await sendMsg(env, chatId, '已取消修改', removeKbOpts());
+    if (!isNaN(id)) return cmdRouteEditMenu(env, chatId, id);
+    return;
+  }
+
+  const choice = findEditRouteField(state.field);
+  if (!choice) {
+    await env.STATE.delete(`dlg:${chatId}`);
+    return sendMsg(env, chatId, '找不到這個設定項目，已取消修改。', removeKbOpts());
+  }
+
+  const { data, sha } = await loadRoutes(env);
+  const route = data.routes.find((x) => x.id === id);
+  if (!route) {
+    await env.STATE.delete(`dlg:${chatId}`);
+    return sendMsg(env, chatId, `找不到 #${id}`, removeKbOpts());
+  }
+
+  try {
+    applyRouteEditValue(route, state.field, text);
+  } catch (e) {
+    return sendMsg(
+      env,
+      chatId,
+      `❌ ${e.message}\n請重新輸入「${choice.label.replace(/^改/, '')}」：`,
+      routeEditFieldOpts(choice)
+    );
+  }
+
+  await saveRoutes(env, data, sha, `Edit route #${id} ${state.field} via bot buttons`);
+  await env.STATE.delete(`dlg:${chatId}`);
+  await sendMsg(env, chatId, `✅ #${id} ${choice.label.replace(/^改/, '')}已更新`, removeKbOpts());
+  return sendMsg(env, chatId, `📍 路線詳細\n\n${formatRouteSummary(route)}`, routeButtons(route));
 }
