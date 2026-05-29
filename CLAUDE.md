@@ -16,6 +16,14 @@
 - 使用者完全用 Telegram bot 管理路線（/add /list /remove /scan）
 - 不放 VPS，全部跑在 GitHub Actions + Cloudflare Workers
 
+**新對話接手重點（2026-05-29 更新）：**
+- 最新程式已 push / deploy，commit：`2467215 Improve Telegram bot menu and add flow`
+- Cloudflare 最新部署時間：2026-05-29 17:24:14 台北時間
+- Telegram bot 現在已有 `/menu` 主選單、路線操作按鈕、快速 `/add`
+- `/add` 日期已支援 `10/1-12/31`、`10月到12月`、`明年10月到12月`、`賞楓`、`寒假`、`暑假`、`跨年`
+- 下一輪請先看 `HANDOFF.md` 第九章「下一輪優化 Roadmap」
+- 下一個最重要目標：一句話新增路線，例如「我想明年10月到12月去札幌，豪經，9天，跨兩個週末」
+
 ---
 
 ## 二、架構
@@ -126,7 +134,7 @@ flight-tracker/
 
 ---
 
-## 五、現在的狀態（2026-05-29 接手更新）
+## 五、現在的狀態（2026-05-29 已上線更新）
 
 ### ✅ 已完成
 1. **階段 0–4**：GitHub repo、Actions 排程、Python scrape pipeline、Telegram 推播全部跑通
@@ -138,11 +146,15 @@ flight-tracker/
 7. `notify.py` 已整合資訊化心跳、異常下殺警報、連續失敗警報、多 chat_id
 8. `scrape.py` 已整合即時匯率、舊資料清理、空白 airline 清理、連續失敗狀態
 9. `query.yml` + `scripts/query.py` 已支援 Telegram 查詢歷史最低、每日最低與走勢圖
+10. `/menu` 主選單已上線，路線列表可點按鈕進操作面板
+11. 路線操作面板已支援每日最低、走勢圖、歷史最低、立即掃描、暫停/恢復、改通知、複製、刪除
+12. `/add` 已改成快速新增：目的地、出發地、日期、天數、艙等、週末、通知標準
+13. `/add` 人話日期已支援：`10/1-12/31`、`10月到12月`、`明年10月到12月`、`賞楓`、`寒假`、`暑假`、`跨年`
 
 ### ⏳ 進行中
-- 這批變更尚未 commit / push / deploy；部署後才會反映到 Telegram bot
-- `/history` `/best` `/chart` 需要新的 `query.yml` 先推到 GitHub，Worker 才觸發得到
-- GitHub Actions 第一次跑新版 scrape 後，才會開始保存 `scrape_state.json` 與 `last_fx.json`
+- 下一輪要繼續把整體 Telegram bot 從「指令工具」改成「旅行助理」
+- 優先做「一句話新增路線」
+- 再做「修改路線全按鈕化」與 `/menu` 首頁狀態面板
 
 ### 🐛 已知小議題
 - `data/prices.db` 與 `data/analysis.json` 雖已在 `.gitignore`，但目前仍存在於 git 追蹤清單；未來可用 `git rm --cached` 讓 repo 真正停止追蹤這兩個產生物
