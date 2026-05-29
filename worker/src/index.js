@@ -7,7 +7,7 @@ const HELP_TEXT = `🤖 機票追蹤 Bot
 【路線管理】
 /list                       列出所有追蹤航線
 /show <id>                  看某條航線詳細（含操作按鈕）
-/add                        新增航線（按鈕引導）
+/add                        新增航線（按鈕引導，也可接一句話）
 /edit <id> <field> <value>  修改某欄位
 /clone <id>                 複製一條路線（可再 /edit 改）
 /remove <id>                刪除航線
@@ -28,6 +28,7 @@ const HELP_TEXT = `🤖 機票追蹤 Bot
 
 提示：
 • 不想背指令就輸入 /menu
+• 可直接打：我想明年10月到12月去札幌，豪經，9天，跨兩個週末
 • /add 是快速新增：目的地、出發地、日期、天數、艙等、週末、通知
 • 日期可以輸入 10/1-12/31、10月到12月、賞楓、寒假
 • 抵達機場可輸入城市中文名（東京、大阪、首爾、曼谷…）自動轉成 IATA
@@ -148,6 +149,11 @@ const ADD_DEFAULTS = {
   depart_time_window: null,
   return_time_window: null,
   max_stops: 1,
+};
+
+const NATURAL_ADD_DEFAULTS = {
+  origin: 'TPE',
+  notify_threshold: 'cheap',
 };
 
 // 時段按鈕對應
@@ -616,7 +622,12 @@ const ADD_STEPS = [
     key: 'trip_duration_days',
     prompt: '大概要玩幾天？',
     keyboard: [['3', '5', '7'], ['9', '10', '14']],
-    parse: (v) => parseInt(v),
+    parse: (v) => {
+      const digit = v.match(/\d+/);
+      if (digit) return parseInt(digit[0]);
+      const word = v.match(/[一二兩三四五六七八九十]+/);
+      return word ? parseChineseInteger(word[0]) : NaN;
+    },
     validate: (v) => (Number.isFinite(v) && v >= 1 && v <= 90 ? null : '須為 1-90 整數'),
   },
   {
@@ -643,7 +654,9 @@ const ADD_STEPS = [
     keyboard: [['不用限制週末'], ['至少 1 個週末'], ['至少 2 個週末']],
     parse: (v) => {
       const m = v.match(/\d+/);
-      return m ? parseInt(m[0]) : 0;
+      if (m) return parseInt(m[0]);
+      const word = v.match(/[一二兩三四五]/);
+      return word ? parseChineseInteger(word[0]) : 0;
     },
     validate: (v) => (v >= 0 && v <= 5 ? null : '須為 0-5'),
   },
@@ -660,19 +673,422 @@ const ADD_STEPS = [
   },
 ];
 
+const ADD_CONFIRM_KEYBOARD = [['✅ 確認新增', '✏️ 修改'], ['❌ 取消']];
+
+const ADD_DRAFT_EDIT_CHOICES = [
+  { label: '改目的地', key: 'destinations' },
+  { label: '改出發地', key: 'origin' },
+  { label: '改日期', key: 'depart_date_range' },
+  { label: '改天數', key: 'trip_duration_days' },
+  { label: '改艙等', key: 'cabin_classes' },
+  { label: '改週末', key: 'must_contain_full_weekends' },
+  { label: '改通知', key: 'notify_threshold' },
+];
+
+const ADD_FIELD_LABELS = {
+  destinations: '目的地',
+  origin: '出發地',
+  depart_date_range: '日期',
+  trip_duration_days: '天數',
+  cabin_classes: '艙等',
+  must_contain_full_weekends: '週末',
+  notify_threshold: '通知標準',
+};
+
+function normalizeUserText(text) {
+  return String(text || '')
+    .replace(/[０-９Ａ-Ｚａ-ｚ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/／/g, '/')
+    .replace(/[－–—～〜]/g, '-')
+    .trim();
+}
+
+function compactUserText(text) {
+  return normalizeUserText(text).replace(/\s+/g, '');
+}
+
+function parseChineseInteger(text) {
+  const s = String(text || '').trim();
+  if (/^\d+$/.test(s)) return Number(s);
+  const digits = {
+    零: 0,
+    一: 1,
+    二: 2,
+    兩: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+  if (Object.prototype.hasOwnProperty.call(digits, s)) return digits[s];
+  if (s === '十') return 10;
+  const ten = s.match(/^([一二兩三四五六七八九])?十([一二三四五六七八九])?$/);
+  if (ten) {
+    const tens = ten[1] ? digits[ten[1]] : 1;
+    const ones = ten[2] ? digits[ten[2]] : 0;
+    return tens * 10 + ones;
+  }
+  return NaN;
+}
+
+function findAirportMentions(text) {
+  const normalized = normalizeUserText(text);
+  const mentions = [];
+  const cities = Object.keys(AIRPORTS).sort((a, b) => b.length - a.length);
+  for (const city of cities) {
+    let start = 0;
+    while (start < normalized.length) {
+      const idx = normalized.indexOf(city, start);
+      if (idx < 0) break;
+      const airports = AIRPORTS[city];
+      mentions.push({
+        type: 'city',
+        value: city,
+        index: idx,
+        length: city.length,
+        codes: airports.map(([code]) => code),
+        originCode: airports[0][0],
+      });
+      start = idx + city.length;
+    }
+  }
+
+  const iataRe = /(^|[^A-Za-z])([A-Za-z]{3})(?=$|[^A-Za-z])/g;
+  let m;
+  while ((m = iataRe.exec(normalized)) !== null) {
+    const index = m.index + m[1].length;
+    const code = m[2].toUpperCase();
+    mentions.push({
+      type: 'iata',
+      value: code,
+      index,
+      length: 3,
+      codes: [code],
+      originCode: code,
+    });
+  }
+
+  mentions.sort((a, b) => (a.index - b.index) || (b.length - a.length));
+  const filtered = [];
+  for (const mention of mentions) {
+    const overlaps = filtered.some((x) =>
+      mention.index < x.index + x.length && x.index < mention.index + mention.length
+    );
+    if (!overlaps) filtered.push(mention);
+  }
+  return filtered;
+}
+
+function hasDirectionalWordBefore(text, mention) {
+  const before = text.slice(Math.max(0, mention.index - 5), mention.index);
+  return /(去|到|飛往|飛)$/.test(before) || /(去|到|飛往|飛)/.test(before.slice(-3));
+}
+
+function extractAirportsFromSentence(text) {
+  const normalized = normalizeUserText(text);
+  const mentions = findAirportMentions(normalized);
+  if (mentions.length === 0) return {};
+
+  let originMention = null;
+  let destMention = null;
+  for (const mention of mentions) {
+    const before = normalized.slice(Math.max(0, mention.index - 5), mention.index);
+    const after = normalized.slice(mention.index + mention.length, mention.index + mention.length + 5);
+    if (/從|自/.test(before) || /出發/.test(after)) originMention = mention;
+    if (hasDirectionalWordBefore(normalized, mention)) destMention = mention;
+  }
+
+  if (!destMention && mentions.length >= 2) {
+    for (let i = 0; i < mentions.length - 1; i += 1) {
+      const current = mentions[i];
+      const next = mentions[i + 1];
+      const between = normalized.slice(current.index + current.length, next.index);
+      if (/(到|去|飛往|飛|出發)/.test(between)) {
+        if (!originMention) originMention = current;
+        destMention = next;
+        break;
+      }
+    }
+  }
+
+  if (!destMention) {
+    destMention = mentions.find((mention) => mention !== originMention) || mentions[0];
+  }
+
+  const out = {};
+  if (originMention && originMention !== destMention) out.origin = originMention.originCode;
+  if (destMention) out.destinations = [...new Set(destMention.codes)];
+  return out;
+}
+
+function extractDateRangeFromSentence(text) {
+  const normalized = normalizeUserText(text);
+  try {
+    return parseFlexibleDateRange(normalized);
+  } catch {
+    // 繼續從整句裡找日期片段。
+  }
+
+  const compact = compactUserText(text);
+  const patterns = [
+    /(?:明年|今年)?\d{4}[-/]\d{1,2}[-/]\d{1,2}[-,，~到至]+(?:\d{4}[-/])?\d{1,2}[-/]\d{1,2}/,
+    /(?:明年|今年)?\d{1,2}\/\d{1,2}[-~到至]\d{1,2}\/\d{1,2}/,
+    /(?:明年|今年)?\d{1,2}月(?:\d{1,2}日?)?[-~到至]\d{1,2}月(?:\d{1,2}日?)?/,
+    /(?:明年|今年)?\d{1,2}[-~到至]\d{1,2}月/,
+  ];
+  for (const pattern of patterns) {
+    const m = compact.match(pattern);
+    if (!m) continue;
+    try {
+      return parseFlexibleDateRange(m[0]);
+    } catch {
+      // 試下一個片段。
+    }
+  }
+  return null;
+}
+
+function extractDurationDays(text) {
+  const compact = compactUserText(text);
+  let m = compact.match(/(?:玩|去|待|住|旅行|旅遊)?(\d{1,2})天/);
+  if (m) return Number(m[1]);
+  m = compact.match(/(?:玩|去|待|住|旅行|旅遊)?([一二兩三四五六七八九十]{1,3})天/);
+  if (!m) return undefined;
+  const n = parseChineseInteger(m[1]);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function extractWeekendCount(text) {
+  const compact = compactUserText(text);
+  if (/(不用|不需要|無需|不要).{0,4}[週周]末/.test(compact)) return 0;
+  const m = compact.match(/(?:跨|含|包含|至少)?([0-5一二兩三四五])個?(?:完整)?[週周]末/);
+  if (m) {
+    const n = parseChineseInteger(m[1]);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  if (/(跨|含|包含).{0,2}[週周]末/.test(compact)) return 1;
+  return undefined;
+}
+
+function extractCabinClassesFromSentence(text) {
+  let compact = compactUserText(text).toLowerCase();
+  const aliases = [
+    ['豪華經濟艙', 'premium_economy'],
+    ['豪華經濟', 'premium_economy'],
+    ['豪經', 'premium_economy'],
+    ['經濟艙', 'economy'],
+    ['經濟', 'economy'],
+    ['商務艙', 'business'],
+    ['商務', 'business'],
+    ['頭等艙', 'first'],
+    ['頭等', 'first'],
+    ['premiumeconomy', 'premium_economy'],
+    ['business', 'business'],
+    ['economy', 'economy'],
+    ['first', 'first'],
+  ];
+  const cabins = [];
+  for (const [label, value] of aliases) {
+    if (!compact.includes(label)) continue;
+    cabins.push(value);
+    compact = compact.split(label).join(' ');
+  }
+  return [...new Set(cabins)];
+}
+
+function extractNotifyThreshold(text) {
+  const compact = compactUserText(text).toLowerCase();
+  if (/(每次都通知|每次通知|全部通知|any)/.test(compact)) return 'any';
+  if (/(不錯|還行|good)/.test(compact)) return 'good';
+  if (/(便宜|cheap)/.test(compact)) return 'cheap';
+  return null;
+}
+
+function extractMaxStops(text) {
+  const compact = compactUserText(text);
+  if (/(直飛|不轉機|不要轉機)/.test(compact)) return 0;
+  const m = compact.match(/(?:最多|可)?轉(?:機)?([0-3一二兩三])次/);
+  if (!m) return undefined;
+  const n = parseChineseInteger(m[1]);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function extractMaxPriceTwd(text) {
+  const compact = compactUserText(text).replace(/,/g, '');
+  let m = compact.match(/(?:預算|上限|低於|不超過|不要超過|小於).{0,8}?(\d{1,3})萬(\d)?/);
+  if (m) return Number(m[1]) * 10000 + Number(m[2] || 0) * 1000;
+  m = compact.match(/(?:預算|上限|低於|不超過|不要超過|小於).{0,8}?(?:NT\$|TWD|台幣|新台幣)?(\d{4,6})/i);
+  if (m) return Number(m[1]);
+  return undefined;
+}
+
+function hasAddValue(data, key) {
+  const value = data?.[key];
+  if (value === undefined || value === null || value === '') return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (key === 'depart_date_range') return Boolean(value.start && value.end);
+  return true;
+}
+
+function validateStoredAddValue(key, value) {
+  if (key === 'destinations') return Array.isArray(value) && value.length > 0 ? null : '至少需 1 個目的地';
+  const step = addStepByKey(key);
+  if (!step?.validate) return null;
+  return step.validate(value);
+}
+
+function nextMissingAddStep(data, startIdx = 0) {
+  for (let i = startIdx; i < ADD_STEPS.length; i += 1) {
+    if (!hasAddValue(data, ADD_STEPS[i].key)) return i;
+  }
+  return -1;
+}
+
+function addStepByKey(key) {
+  return ADD_STEPS.find((step) => step.key === key);
+}
+
+function addStepIndexByKey(key) {
+  return ADD_STEPS.findIndex((step) => step.key === key);
+}
+
+function parseAddStepInput(step, text) {
+  const value = step.parse ? step.parse(text) : text;
+  if (step.validate) {
+    const err = step.validate(value);
+    if (err) throw new Error(err);
+  }
+  const extraNote = step.confirmText ? `✓ ${step.confirmText(value)}\n\n` : '';
+  const stored = step.postParse ? step.postParse(value) : value;
+  return { stored, extraNote };
+}
+
+function addConfirmOpts() {
+  return kbOpts(ADD_CONFIRM_KEYBOARD);
+}
+
+function addDraftEditOpts() {
+  const rows = ADD_DRAFT_EDIT_CHOICES.map((choice) => [choice.label]);
+  rows.push(['✅ 回到確認'], ['❌ 取消']);
+  return kbOpts(rows);
+}
+
+function formatNaturalAddNotes(notes) {
+  if (!notes || notes.length === 0) return '';
+  return `\n\n我先補上的預設：\n${notes.map((note) => `• ${note}`).join('\n')}`;
+}
+
+function formatAddDraftPartial(data) {
+  const lines = [];
+  if (hasAddValue(data, 'origin')) lines.push(`出發：${data.origin}`);
+  if (hasAddValue(data, 'destinations')) lines.push(`抵達：${data.destinations.join(', ')}`);
+  if (hasAddValue(data, 'depart_date_range')) lines.push(`日期：${data.depart_date_range.start} ~ ${data.depart_date_range.end}`);
+  if (hasAddValue(data, 'trip_duration_days')) lines.push(`天數：${data.trip_duration_days} 天`);
+  if (hasAddValue(data, 'cabin_classes')) {
+    const cabins = data.cabin_classes.map((c) => CABIN_VAL_TO_LABEL[c] || c).join(', ');
+    lines.push(`艙等：${cabins}`);
+  }
+  if (hasAddValue(data, 'must_contain_full_weekends')) {
+    lines.push(`週末：需含 ${data.must_contain_full_weekends} 個完整週末`);
+  }
+  if (data.max_stops !== undefined) lines.push(`轉機：最多 ${data.max_stops} 次`);
+  if (data.max_price_twd !== undefined) lines.push(`價上限：${data.max_price_twd ? 'NT$ ' + data.max_price_twd.toLocaleString() : '不限'}`);
+  if (hasAddValue(data, 'notify_threshold')) lines.push(`通知：${data.notify_threshold}`);
+  return lines.length > 0 ? lines.join('\n') : '目前還沒抓到明確欄位';
+}
+
+function parseNaturalAddSentence(raw, force = false) {
+  const text = normalizeUserText(raw);
+  const compact = compactUserText(raw);
+  const data = {};
+  const notes = [];
+  const parsedSignals = [];
+
+  const airports = extractAirportsFromSentence(text);
+  if (airports.destinations?.length) {
+    data.destinations = airports.destinations;
+    parsedSignals.push('destinations');
+  }
+  if (airports.origin) {
+    data.origin = airports.origin;
+  } else if (data.destinations) {
+    data.origin = NATURAL_ADD_DEFAULTS.origin;
+    notes.push('出發地未說，先用台北桃園 TPE');
+  }
+
+  const dateRange = extractDateRangeFromSentence(text);
+  if (dateRange) {
+    data.depart_date_range = { start: dateRange.start, end: dateRange.end };
+    parsedSignals.push('depart_date_range');
+  }
+
+  const duration = extractDurationDays(text);
+  if (duration !== undefined) {
+    data.trip_duration_days = duration;
+    parsedSignals.push('trip_duration_days');
+  }
+
+  const cabins = extractCabinClassesFromSentence(text);
+  if (cabins.length > 0) {
+    data.cabin_classes = cabins;
+    parsedSignals.push('cabin_classes');
+  }
+
+  const weekends = extractWeekendCount(text);
+  if (weekends !== undefined) {
+    data.must_contain_full_weekends = weekends;
+    parsedSignals.push('must_contain_full_weekends');
+  }
+
+  const threshold = extractNotifyThreshold(text);
+  if (threshold) {
+    data.notify_threshold = threshold;
+  } else if (parsedSignals.length >= 2) {
+    data.notify_threshold = NATURAL_ADD_DEFAULTS.notify_threshold;
+    notes.push('通知標準先用 cheap，也就是便宜才通知');
+  }
+
+  const maxStops = extractMaxStops(text);
+  if (maxStops !== undefined) data.max_stops = maxStops;
+
+  const maxPrice = extractMaxPriceTwd(text);
+  if (maxPrice !== undefined) data.max_price_twd = maxPrice;
+
+  for (const step of ADD_STEPS) {
+    if (!hasAddValue(data, step.key)) continue;
+    const err = validateStoredAddValue(step.key, data[step.key]);
+    if (!err) continue;
+    delete data[step.key];
+    notes.push(`${ADD_FIELD_LABELS[step.key] || step.key}需要再補一次：${err}`);
+  }
+
+  const hasIntent = /(想去|想飛|我要去|我要飛|追蹤|新增|機票|航班|旅行|旅遊|去|飛)/.test(compact);
+  const hasEnoughSignals = parsedSignals.length >= 2 || (hasIntent && parsedSignals.length >= 1) || (force && parsedSignals.length >= 1);
+  if (!hasEnoughSignals) return { ok: false };
+
+  const missing = ADD_STEPS
+    .filter((step) => !hasAddValue(data, step.key))
+    .map((step) => step.key);
+  return { ok: true, data, missing, notes };
+}
+
 function formatRouteSummary(r) {
   const cabins = (r.cabin_classes || []).map((c) => CABIN_VAL_TO_LABEL[c] || c).join(', ');
   const dests = (r.destinations || []).join(', ');
   const dep = r.depart_time_window || '不限';
   const ret = r.return_time_window || '不限';
   const status = r.active === false ? '⏸️ 暫停' : '🟢 啟用';
+  const weekendCount = r.must_contain_full_weekends ?? '?';
   return [
     `${status} #${r.id ?? '?'} ${r.name}`,
     `   出發：${r.origin}`,
     `   抵達：${dests}`,
     `   艙等：${cabins}`,
     `   日期：${r.depart_date_range?.start ?? '?'} ~ ${r.depart_date_range?.end ?? '?'}`,
-    `   天數：${r.trip_duration_days} 天，需含 ${r.must_contain_full_weekends || 0} 個完整週末`,
+    `   天數：${r.trip_duration_days} 天，需含 ${weekendCount} 個完整週末`,
     `   時段：去 ${dep} / 回 ${ret}`,
     `   轉機：最多 ${r.max_stops ?? 0} 次`,
     `   價上限：${r.max_price_twd ? 'NT$ ' + r.max_price_twd.toLocaleString() : '不限'}`,
@@ -746,6 +1162,7 @@ async function handleCommand(env, chatId, text) {
     case '/show':
       return cmdShow(env, chatId, parseInt(args[0]));
     case '/add':
+      if (args.length > 0) return cmdAddFromSentence(env, chatId, args.join(' '), true);
       return cmdAddStart(env, chatId);
     case '/edit':
       return cmdEdit(env, chatId, parseInt(args[0]), args[1], args.slice(2).join(' '));
@@ -979,6 +1396,8 @@ async function cmdMenu(env, chatId) {
 
 async function handleMenuText(env, chatId, text) {
   const t = text.replace(/\s+/g, '');
+  const naturalAddHandled = await cmdAddFromSentence(env, chatId, text, false);
+  if (naturalAddHandled) return;
   if (t.includes('新增')) return cmdAddStart(env, chatId);
   if (t.includes('我的路線') || t.includes('路線')) return cmdList(env, chatId);
   if (t.includes('掃描')) return cmdScan(env, chatId);
@@ -1152,6 +1571,48 @@ async function cmdScan(env, chatId) {
 }
 
 // ─── /add 多輪 ───
+async function cmdAddFromSentence(env, chatId, text, force) {
+  const parsed = parseNaturalAddSentence(text, force);
+  if (!parsed.ok) {
+    if (force) {
+      await sendMsg(env, chatId, '我還看不出足夠的路線資訊，改用逐步新增。');
+      await cmdAddStart(env, chatId);
+      return true;
+    }
+    return false;
+  }
+
+  const state = {
+    flow: 'add_confirm',
+    data: parsed.data,
+    source: 'natural_add',
+  };
+  const missingIdx = nextMissingAddStep(state.data, 0);
+  if (missingIdx < 0) {
+    await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
+    const intro = `我理解成這樣：${formatNaturalAddNotes(parsed.notes)}`;
+    await sendAddConfirmPreview(env, chatId, state, intro);
+    return true;
+  }
+
+  state.flow = 'add';
+  state.step = missingIdx;
+  await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
+  const step = ADD_STEPS[missingIdx];
+  const preview = formatAddDraftPartial(state.data);
+  const note = [
+    '我先抓到這些：',
+    '',
+    preview,
+    formatNaturalAddNotes(parsed.notes),
+    '',
+    `還需要補「${ADD_FIELD_LABELS[step.key] || step.key}」。`,
+    '',
+  ].join('\n');
+  await promptStep(env, chatId, missingIdx, note);
+  return true;
+}
+
 async function cmdAddStart(env, chatId) {
   await env.STATE.put(
     `dlg:${chatId}`,
@@ -1174,9 +1635,21 @@ async function promptStep(env, chatId, idx, extraNote = '') {
   await sendMsg(env, chatId, extraNote + step.prompt, opts);
 }
 
+async function sendAddConfirmPreview(env, chatId, state, intro) {
+  const preview = formatRouteSummary(buildAddRoute('?', state.data));
+  await sendMsg(
+    env,
+    chatId,
+    `${intro}\n\n${preview}\n\n我已先用推薦設定：不限預算、去回時段不限、最多轉 1 次。\n按下方按鈕確認、修改或取消。`,
+    addConfirmOpts()
+  );
+}
+
 async function handleFlow(env, chatId, text, state) {
   if (state.flow === 'add') return handleAddFlow(env, chatId, text, state);
   if (state.flow === 'add_confirm') return handleAddConfirm(env, chatId, text, state);
+  if (state.flow === 'add_draft_edit') return handleAddDraftEdit(env, chatId, text, state);
+  if (state.flow === 'add_draft_field') return handleAddDraftField(env, chatId, text, state);
   await env.STATE.delete(`dlg:${chatId}`);
   await sendMsg(env, chatId, '未知對話狀態，已清除', removeKbOpts());
 }
@@ -1189,9 +1662,9 @@ async function handleAddFlow(env, chatId, text, state) {
   }
 
   const step = ADD_STEPS[state.step];
-  let value;
+  let parsed;
   try {
-    value = step.parse ? step.parse(text) : text;
+    parsed = parseAddStepInput(step, text);
   } catch (e) {
     return sendMsg(
       env,
@@ -1200,44 +1673,22 @@ async function handleAddFlow(env, chatId, text, state) {
       step.keyboard ? kbOpts(step.keyboard) : removeKbOpts()
     );
   }
-  if (step.validate) {
-    const err = step.validate(value);
-    if (err) {
-      return sendMsg(
-        env,
-        chatId,
-        `❌ ${err}\n請重新輸入：`,
-        step.keyboard ? kbOpts(step.keyboard) : removeKbOpts()
-      );
-    }
-  }
-
-  // 給確認文字（例如多目的地解析結果）
-  let extraNote = '';
-  if (step.confirmText) {
-    extraNote = `✓ ${step.confirmText(value)}\n\n`;
-  }
 
   // postParse：把存進 state.data 的形式縮減
-  const stored = step.postParse ? step.postParse(value) : value;
-  state.data[step.key] = stored;
-  state.step += 1;
+  state.data = state.data || {};
+  state.data[step.key] = parsed.stored;
+  const nextStep = nextMissingAddStep(state.data, state.step + 1);
 
-  if (state.step >= ADD_STEPS.length) {
+  if (nextStep < 0) {
     state.flow = 'add_confirm';
     await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
-    const preview = formatRouteSummary(buildAddRoute('?', state.data));
-    await sendMsg(
-      env,
-      chatId,
-      `${extraNote}📋 請確認新增：\n\n${preview}\n\n我已先用推薦設定：不限預算、去回時段不限、最多轉 1 次。\n按下方按鈕確認或取消。`,
-      kbOpts([['✅ 確認新增'], ['❌ 取消']])
-    );
+    await sendAddConfirmPreview(env, chatId, state, `${parsed.extraNote}📋 請確認新增：`);
     return;
   }
 
+  state.step = nextStep;
   await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
-  await promptStep(env, chatId, state.step, extraNote);
+  await promptStep(env, chatId, state.step, parsed.extraNote);
 }
 
 async function handleAddConfirm(env, chatId, text, state) {
@@ -1245,12 +1696,17 @@ async function handleAddConfirm(env, chatId, text, state) {
     await env.STATE.delete(`dlg:${chatId}`);
     return sendMsg(env, chatId, '已取消，未新增任何路線', removeKbOpts());
   }
+  if (/修改|edit|✏️/i.test(text)) {
+    state.flow = 'add_draft_edit';
+    await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
+    return sendMsg(env, chatId, '要修改哪一項？', addDraftEditOpts());
+  }
   if (!/確認|✅|confirm/i.test(text)) {
     return sendMsg(
       env,
       chatId,
-      '請點「✅ 確認新增」或「❌ 取消」',
-      kbOpts([['✅ 確認新增'], ['❌ 取消']])
+      '請點「✅ 確認新增」、「✏️ 修改」或「❌ 取消」',
+      addConfirmOpts()
     );
   }
   const { data, sha } = await loadRoutes(env);
@@ -1266,4 +1722,58 @@ async function handleAddConfirm(env, chatId, text, state) {
     `✅ 已新增 #${newId}：${route.name}\n下次排程會自動追蹤，或輸入 /scan 立即抓`,
     removeKbOpts()
   );
+}
+
+async function handleAddDraftEdit(env, chatId, text, state) {
+  if (/^\/cancel$|取消|cancel|❌/i.test(text)) {
+    await env.STATE.delete(`dlg:${chatId}`);
+    return sendMsg(env, chatId, '已取消，未新增任何路線', removeKbOpts());
+  }
+  if (/確認|回到確認|✅/i.test(text)) {
+    state.flow = 'add_confirm';
+    await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
+    return sendAddConfirmPreview(env, chatId, state, '📋 請確認新增：');
+  }
+  const compact = compactUserText(text);
+  const choice = ADD_DRAFT_EDIT_CHOICES.find((item) => compact.includes(item.label.replace(/^改/, '')));
+  if (!choice) {
+    return sendMsg(env, chatId, '請選一個要修改的項目，或點「✅ 回到確認」。', addDraftEditOpts());
+  }
+  state.flow = 'add_draft_field';
+  state.editKey = choice.key;
+  await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
+  return promptStep(env, chatId, addStepIndexByKey(choice.key), `請輸入新的「${ADD_FIELD_LABELS[choice.key] || choice.key}」。\n\n`);
+}
+
+async function handleAddDraftField(env, chatId, text, state) {
+  if (/^\/cancel$|取消|cancel|❌/i.test(text)) {
+    await env.STATE.delete(`dlg:${chatId}`);
+    return sendMsg(env, chatId, '已取消，未新增任何路線', removeKbOpts());
+  }
+  const step = addStepByKey(state.editKey);
+  if (!step) {
+    state.flow = 'add_draft_edit';
+    delete state.editKey;
+    await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
+    return sendMsg(env, chatId, '找不到要修改的欄位，請重新選一次。', addDraftEditOpts());
+  }
+
+  let parsed;
+  try {
+    parsed = parseAddStepInput(step, text);
+  } catch (e) {
+    return sendMsg(
+      env,
+      chatId,
+      `❌ ${e.message}\n請重新輸入：`,
+      step.keyboard ? kbOpts(step.keyboard) : removeKbOpts()
+    );
+  }
+
+  state.data = state.data || {};
+  state.data[step.key] = parsed.stored;
+  delete state.editKey;
+  state.flow = 'add_confirm';
+  await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
+  return sendAddConfirmPreview(env, chatId, state, `${parsed.extraNote}📋 已更新，請再確認：`);
 }
