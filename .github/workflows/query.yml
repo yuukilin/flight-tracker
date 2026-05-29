@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'history / best / chart'
+        description: 'history / best / chart / debug'
         type: choice
-        options: [history, best, chart]
+        options: [history, best, chart, debug]
         required: true
       route_id:
         description: 'Route ID'

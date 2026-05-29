@@ -21,6 +21,8 @@ const HELP_TEXT = `🤖 機票追蹤 Bot
 /history <id> [days]        過去 N 天每日最低（預設 30 天）
 /best <id>                  歷史最低 5 筆
 /chart <id> [days]          走勢圖 PNG（預設 30 天）
+/debug <id>                 檢查上次抓取是否符合路線設定
+/last <id>                  同 /debug
 
 【其他】
 /cancel                     取消當前 /add 對話
@@ -254,6 +256,7 @@ const BOT_COMMANDS = [
   { command: 'history', description: '查看過去每日最低' },
   { command: 'best', description: '查看歷史最低' },
   { command: 'chart', description: '取得價格走勢圖' },
+  { command: 'debug', description: '檢查上次抓取資料' },
   { command: 'help', description: '查看說明' },
 ];
 
@@ -1212,6 +1215,9 @@ async function handleCommand(env, chatId, text) {
       return cmdQuery(env, chatId, 'best', parseInt(args[0]), 30);
     case '/chart':
       return cmdQuery(env, chatId, 'chart', parseInt(args[0]), normalizeDays(parseInt(args[1]) || 30));
+    case '/debug':
+    case '/last':
+      return cmdQuery(env, chatId, 'debug', parseInt(args[0]), 30);
     case '/cancel':
       await env.STATE.delete(`dlg:${chatId}`);
       return sendMsg(env, chatId, '已取消', removeKbOpts());
@@ -1540,7 +1546,9 @@ async function cmdQuery(env, chatId, action, id, days) {
   });
   const note = action === 'best'
     ? `✅ 已觸發歷史最低查詢 #${id}，約 1-2 分鐘後回傳`
-    : `✅ 已觸發 ${action} 查詢 #${id}（${days} 天），約 1-2 分鐘後回傳`;
+    : action === 'debug'
+      ? `✅ 已觸發抓取診斷 #${id}，約 1-2 分鐘後回傳`
+      : `✅ 已觸發 ${action} 查詢 #${id}（${days} 天），約 1-2 分鐘後回傳`;
   await sendMsg(env, chatId, note, removeKbOpts());
 }
 
@@ -1582,14 +1590,15 @@ function routeButtons(route) {
       { text: '立即掃描', callback_data: 'scan' },
     ],
     [
-      activeButton,
+      { text: '檢查抓取', callback_data: `debug:${id}` },
       { text: '修改設定', callback_data: `edit_route:${id}` },
     ],
     [
+      activeButton,
       { text: '改通知', callback_data: `threshold:${id}` },
-      { text: '複製路線', callback_data: `clone:${id}` },
     ],
     [
+      { text: '複製路線', callback_data: `clone:${id}` },
       { text: '刪除', callback_data: `remove:${id}` },
     ],
   ]);
@@ -1722,6 +1731,7 @@ async function handleCallback(env, cb) {
   if (action === 'history') return cmdQuery(env, chatId, 'history', id, 30);
   if (action === 'best') return cmdQuery(env, chatId, 'best', id, 30);
   if (action === 'chart') return cmdQuery(env, chatId, 'chart', id, 30);
+  if (action === 'debug') return cmdQuery(env, chatId, 'debug', id, 30);
   if (action === 'pause') return cmdToggleActive(env, chatId, id, false);
   if (action === 'resume') return cmdToggleActive(env, chatId, id, true);
   if (action === 'clone') return cmdClone(env, chatId, id);

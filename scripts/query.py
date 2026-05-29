@@ -3,6 +3,7 @@
 action=history   過去 N 天每日最低
 action=best      歷史最低 5 筆
 action=chart     價格走勢 PNG（sendPhoto）
+action=debug     上次掃描診斷
 
 環境變數：
   TELEGRAM_BOT_TOKEN
@@ -20,6 +21,7 @@ from urllib.parse import quote_plus
 ROOT = Path(__file__).parent.parent
 DB_PATH = ROOT / 'data' / 'prices.db'
 ROUTES_JSON = ROOT / 'routes.json'
+SCRAPE_STATE_JSON = ROOT / 'data' / 'scrape_state.json'
 LCC_YAML = ROOT / 'excluded_airlines.yaml'
 
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
@@ -60,6 +62,16 @@ def load_lcc_config():
             if isinstance(v, list):
                 codes.update(v)
     return codes, keywords
+
+
+def load_scrape_state():
+    if not SCRAPE_STATE_JSON.exists():
+        return {}
+    try:
+        with open(SCRAPE_STATE_JSON, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def is_lcc_flight(airline_name, airline_code, lcc_codes, lcc_keywords):
@@ -122,6 +134,78 @@ def send_photo(chat_id, png_path, caption=''):
             timeout=60,
         )
         resp.raise_for_status()
+
+
+def route_label(route):
+    if not route:
+        return '找不到路線設定'
+    dest = '/'.join(route.get('destinations') or ['?'])
+    cabins = '/'.join(route.get('cabin_classes') or ['?'])
+    rng = route.get('depart_date_range') or {}
+    return (
+        f"{route.get('origin', '?')} → {dest}｜{cabins}｜"
+        f"{rng.get('start', '?')} 至 {rng.get('end', '?')}｜"
+        f"{route.get('trip_duration_days', '?')} 天｜跨 {route.get('must_contain_full_weekends', 0)} 個週末"
+    )
+
+
+def money(n):
+    if n is None:
+        return '無資料'
+    return f"NT$ {int(n):,}"
+
+
+def stops_label(stops):
+    if stops in (None, ''):
+        return '轉機不明'
+    return '直飛' if stops == 0 else f"轉機 {stops} 次"
+
+
+def get_latest_scan_date(conn, rid):
+    row = conn.execute(
+        "SELECT DATE(MAX(scan_ts)), MAX(scan_ts) FROM prices WHERE route_id = ?",
+        (rid,),
+    ).fetchone()
+    if not row or not row[0]:
+        return None, None
+    return row[0], row[1]
+
+
+def summarize_expected_vs_actual(route, breakdown):
+    if not route:
+        return []
+    expected_origin = route.get('origin')
+    expected_dest = set(route.get('destinations') or [])
+    expected_cabin = set(route.get('cabin_classes') or [])
+    actual_origin = {r[0] for r in breakdown if r[0]}
+    actual_dest = {r[1] for r in breakdown if r[1]}
+    actual_cabin = {r[2] for r in breakdown if r[2]}
+
+    lines = []
+    if actual_origin and expected_origin not in actual_origin:
+        lines.append(f"出發地不一致：設定 {expected_origin}，資料庫看到 {', '.join(sorted(actual_origin))}")
+    if actual_dest and not actual_dest.issubset(expected_dest):
+        lines.append(f"目的地不一致：設定 {', '.join(sorted(expected_dest))}，資料庫看到 {', '.join(sorted(actual_dest))}")
+    if actual_cabin and not actual_cabin.issubset(expected_cabin):
+        lines.append(f"艙等不一致：設定 {', '.join(sorted(expected_cabin))}，資料庫看到 {', '.join(sorted(actual_cabin))}")
+    if not lines:
+        lines.append("設定與最新資料庫分布看起來一致。")
+    return lines
+
+
+def unique_price_rows(rows, limit):
+    seen = set()
+    out = []
+    for row in rows:
+        price, airline_name, _, dd, rd, dest, stops, _, cabin = row
+        key = (price, airline_name, dd, rd, dest, stops, cabin)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def action_history(rid, days, chat_id):
@@ -264,9 +348,143 @@ def action_chart(rid, days, chat_id):
     send_photo(chat_id, out, caption=caption)
 
 
+def action_debug(rid, chat_id):
+    route = load_route(rid)
+    name = route['name'] if route else f"#{rid}"
+    if not route:
+        send_text(chat_id, f"#{rid} 診斷失敗：找不到這條路線設定。")
+        return
+
+    lines = [
+        f"#{rid} {name}",
+        "抓取診斷",
+        "",
+        "路線設定",
+        route_label(route),
+        f"啟用狀態：{'啟用' if route.get('active', True) else '暫停'}",
+        f"最多轉機：{route.get('max_stops', '未設定')} 次",
+        f"價上限：{money(route.get('max_price_twd')) if route.get('max_price_twd') else '不限'}",
+        f"通知門檻：{route.get('notify_threshold', '未設定')}",
+        "",
+    ]
+
+    state = load_scrape_state()
+    route_state = (state.get('routes') or {}).get(str(rid), {})
+    if route_state:
+        lines.extend([
+            "最近一次掃描狀態",
+            f"last_scan_ts：{route_state.get('last_scan_ts', '無')}",
+            f"last_success_ts：{route_state.get('last_success_ts', '無')}",
+            f"last_written：{route_state.get('last_written', 0)} 筆",
+            f"consecutive_failures：{route_state.get('consecutive_failures', 0)}",
+            "",
+        ])
+    else:
+        lines.extend([
+            "最近一次掃描狀態",
+            "scrape_state.json 尚無這條路線紀錄。",
+            "",
+        ])
+
+    if not DB_PATH.exists():
+        lines.append("資料庫狀態：找不到 prices.db。可能是 cache 尚未建立，或 query workflow 沒有還原到資料庫。")
+        send_text(chat_id, '\n'.join(lines))
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    lcc_codes, lcc_keywords = load_lcc_config()
+    latest_date, latest_ts = get_latest_scan_date(conn, rid)
+    if not latest_date:
+        conn.close()
+        lines.append("資料庫狀態：prices.db 存在，但這條路線還沒有任何票價資料。")
+        send_text(chat_id, '\n'.join(lines))
+        return
+
+    rows = conn.execute("""
+        SELECT price_twd, airline_name, airline_code, depart_date, return_date,
+               destination, stops, is_lcc, origin, cabin
+        FROM prices
+        WHERE route_id = ?
+          AND DATE(scan_ts) = ?
+        ORDER BY price_twd ASC
+    """, (rid, latest_date)).fetchall()
+
+    breakdown = conn.execute("""
+        SELECT origin, destination, cabin, COUNT(*), MIN(price_twd)
+        FROM prices
+        WHERE route_id = ?
+          AND DATE(scan_ts) = ?
+        GROUP BY origin, destination, cabin
+        ORDER BY COUNT(*) DESC
+    """, (rid, latest_date)).fetchall()
+    conn.close()
+
+    traditional = []
+    lcc = []
+    blank_airline = 0
+    for price, airline_name, airline_code, dd, rd, dest, stops, is_lcc, origin, cabin in rows:
+        if not (airline_name or '').strip():
+            blank_airline += 1
+            continue
+        item = (price, airline_name, airline_code, dd, rd, dest, stops, origin, cabin)
+        if is_traditional_flight(airline_name, airline_code, is_lcc, lcc_codes, lcc_keywords):
+            traditional.append(item)
+        else:
+            lcc.append(item)
+
+    lines.extend([
+        "最新資料庫內容",
+        f"最新掃描日期：{latest_date}",
+        f"最新 scan_ts：{latest_ts}",
+        f"總筆數：{len(rows)} 筆",
+        f"傳統航空：{len(traditional)} 筆",
+        f"廉航：{len(lcc)} 筆",
+    ])
+    if blank_airline:
+        lines.append(f"航空公司空白：{blank_airline} 筆（已排除在最低票清單外）")
+    lines.append("")
+
+    lines.append("設定核對")
+    lines.extend(summarize_expected_vs_actual(route, breakdown))
+    lines.append("")
+
+    lines.append("實際分布")
+    for origin, dest, cabin, n, min_price in breakdown[:8]:
+        lines.append(f"{origin} → {dest}｜{cabin}｜{n} 筆｜最低 {money(min_price)}")
+    if len(breakdown) > 8:
+        lines.append(f"另有 {len(breakdown) - 8} 組分布未列出。")
+    lines.append("")
+
+    if traditional:
+        lines.append("傳統航空最低 5 筆")
+        for i, (price, airline_name, _, dd, rd, dest, stops, _, cabin) in enumerate(unique_price_rows(traditional, 5), 1):
+            lines.append(f"{i}. {money(price)}｜{airline_name}｜{dd} 去，{rd} 回｜{dest}｜{cabin}｜{stops_label(stops)}")
+    else:
+        lines.append("傳統航空最低 5 筆")
+        lines.append("沒有可列出的傳統航空票價。")
+    lines.append("")
+
+    if lcc:
+        lines.append("廉航參考 3 筆")
+        for i, (price, airline_name, _, dd, rd, dest, stops, _, cabin) in enumerate(unique_price_rows(lcc, 3), 1):
+            lines.append(f"{i}. {money(price)}｜{airline_name}｜{dd} 去，{rd} 回｜{dest}｜{cabin}｜{stops_label(stops)}")
+        lines.append("提醒：廉航通常未含行李費，僅供參考。")
+        lines.append("")
+
+    lines.append("判讀")
+    if traditional:
+        lines.append("如果實際分布的出發地、目的地、艙等都和設定一致，代表抓取方向是對的。")
+        lines.append("價格仍需點 Google Flights 重新查價確認，因為 Google 會即時更新可訂位與票價。")
+    else:
+        lines.append("如果總筆數很多但傳統航空為 0，通常是航空公司分類或搜尋結果本身需要檢查。")
+
+    buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]]
+    send_text(chat_id, '\n'.join(lines), buttons=buttons)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--action', required=True, choices=['history', 'best', 'chart'])
+    ap.add_argument('--action', required=True, choices=['history', 'best', 'chart', 'debug'])
     ap.add_argument('--route-id', type=int, required=True)
     ap.add_argument('--chat-id', required=True)
     ap.add_argument('--days', type=int, default=30)
@@ -279,6 +497,8 @@ def main():
         action_best(args.route_id, args.chat_id)
     elif args.action == 'chart':
         action_chart(args.route_id, args.days, args.chat_id)
+    elif args.action == 'debug':
+        action_debug(args.route_id, args.chat_id)
 
 
 if __name__ == '__main__':
