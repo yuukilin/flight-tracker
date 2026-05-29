@@ -1,10 +1,11 @@
 """
 機票爬蟲主程式
-1. 讀 routes.yaml（或 routes.json，優先用 routes.json）
-2. 依規則列出所有合格日期組合
-3. 用 fast-flights 抓 Google Flights
-4. 過濾廉航、套用時段/票價/轉機限制
-5. 寫入 SQLite
+1. 讀 routes.json（優先）或 routes.yaml
+2. 即時取 USD→TWD 匯率（多 API fallback + cache）
+3. 依規則列出所有合格日期組合
+4. 用 fast-flights 抓 Google Flights
+5. 過濾廉航、套用時段/票價/轉機限制
+6. 寫入 SQLite，更新連續失敗計數，清理 >365 天舊資料
 """
 
 import os
@@ -12,6 +13,7 @@ import sys
 import json
 import sqlite3
 import yaml
+import urllib.request
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 import logging
@@ -26,11 +28,78 @@ ROUTES_YAML = ROOT / 'routes.yaml'
 ROUTES_JSON = ROOT / 'routes.json'
 LCC_YAML = ROOT / 'excluded_airlines.yaml'
 DB_PATH = ROOT / 'data' / 'prices.db'
+FX_CACHE_PATH = ROOT / 'data' / 'last_fx.json'
+STATE_PATH = ROOT / 'data' / 'scrape_state.json'
+
+FX_DEFAULT = 32.0
+OLD_DATA_DAYS = 365  # 超過幾天的舊資料會被清掉
+
+# ─────────── 即時匯率 ───────────
+
+FX_APIS = [
+    ('https://open.er-api.com/v6/latest/USD', lambda d: d.get('rates', {}).get('TWD')),
+    ('https://api.exchangerate.host/latest?base=USD&symbols=TWD', lambda d: d.get('rates', {}).get('TWD')),
+]
+
+def get_fx_rate(default=FX_DEFAULT):
+    """取 USD→TWD 匯率。多 API fallback，失敗讀 cache，再失敗用 default"""
+    for url, pick in FX_APIS:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'flight-tracker/1.0'})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read().decode('utf-8'))
+            rate = pick(data)
+            if rate and 20 < float(rate) < 50:  # sanity check
+                rate = float(rate)
+                log.info(f"匯率：1 USD = {rate} TWD（來源 {url.split('/')[2]}）")
+                FX_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with open(FX_CACHE_PATH, 'w') as f:
+                    json.dump({'rate': rate, 'ts': datetime.utcnow().isoformat(), 'source': url}, f)
+                return rate
+        except Exception as e:
+            log.warning(f"匯率 API 失敗 {url}：{e}")
+
+    if FX_CACHE_PATH.exists():
+        try:
+            with open(FX_CACHE_PATH, 'r') as f:
+                d = json.load(f)
+            log.info(f"匯率使用 cache：1 USD = {d['rate']} TWD（{d['ts']}）")
+            return float(d['rate'])
+        except Exception as e:
+            log.warning(f"匯率 cache 讀取失敗：{e}")
+
+    log.warning(f"匯率全部失敗，使用 default {default}")
+    return default
+
+# ─────────── scrape_state.json ───────────
+
+def load_state():
+    if STATE_PATH.exists():
+        try:
+            with open(STATE_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            log.warning(f"scrape_state.json 損壞：{e}，重建")
+    return {'routes': {}}
+
+def save_state(state):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_PATH, 'w', encoding='utf-8') as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+def update_state(state, route_id, written):
+    info = state.setdefault('routes', {}).setdefault(str(route_id), {})
+    info['last_scan_ts'] = datetime.utcnow().isoformat()
+    info['last_written'] = written
+    if written > 0:
+        info['last_success_ts'] = info['last_scan_ts']
+        info['consecutive_failures'] = 0
+    else:
+        info['consecutive_failures'] = info.get('consecutive_failures', 0) + 1
 
 # ─────────── 讀檔 ───────────
 
 def load_routes():
-    """優先讀 routes.json（給 Telegram bot 修改用），沒有才讀 yaml"""
     if ROUTES_JSON.exists():
         with open(ROUTES_JSON, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -38,17 +107,14 @@ def load_routes():
         return yaml.safe_load(f)
 
 def load_lcc_config():
-    """讀廉航設定。回傳 (iata_codes set, name_keywords list)"""
     with open(LCC_YAML, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
     codes = set()
     keywords = []
-    # 新格式：頂層有 iata_codes 和 name_keywords
     if 'iata_codes' in data or 'name_keywords' in data:
         codes = set(data.get('iata_codes') or [])
         keywords = [k.lower() for k in (data.get('name_keywords') or [])]
     else:
-        # 舊格式：每個 region key 都是 list
         for v in data.values():
             if isinstance(v, list):
                 codes.update(v)
@@ -62,6 +128,8 @@ def is_lcc_flight(airline_name, airline_code, lcc_codes, lcc_keywords):
         if any(kw in name_lower for kw in lcc_keywords):
             return True
     return False
+
+# ─────────── DB ───────────
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -93,17 +161,40 @@ def init_db():
     conn.commit()
     return conn
 
+def cleanup_invalid_rows(conn):
+    cur = conn.execute("DELETE FROM prices WHERE airline_name IS NULL OR TRIM(airline_name) = ''")
+    log.info(f"清除空白 airline 舊資料：{cur.rowcount} 筆")
+    conn.commit()
+
+def cleanup_old_data(conn, days=OLD_DATA_DAYS):
+    cur = conn.execute(
+        "DELETE FROM prices WHERE DATE(scan_ts) < DATE('now', ?)",
+        (f'-{days} day',)
+    )
+    log.info(f"清理 >{days} 天舊資料：{cur.rowcount} 筆")
+    conn.commit()
+
+def reclassify_is_lcc(conn, lcc_codes, lcc_keywords):
+    rows = conn.execute('SELECT id, airline_name, airline_code, is_lcc FROM prices').fetchall()
+    changed = 0
+    for id_, name, code, old in rows:
+        new_val = int(is_lcc_flight(name or '', code or '', lcc_codes, lcc_keywords))
+        if new_val != old:
+            conn.execute('UPDATE prices SET is_lcc = ? WHERE id = ?', (new_val, id_))
+            changed += 1
+    conn.commit()
+    log.info(f"重新分類 is_lcc：{changed} / {len(rows)} 筆有變更")
+
 # ─────────── 日期列舉 ───────────
 
 WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 WEEKDAY_MAP = {n: i for i, n in enumerate(WEEKDAY_NAMES)}
 
 def count_full_weekends(start_d, end_d):
-    """計算區間內完整的(週六+週日)對數"""
     count = 0
     cur = start_d
     while cur <= end_d:
-        if cur.weekday() == 5:  # Saturday
+        if cur.weekday() == 5:
             sun = cur + timedelta(days=1)
             if sun <= end_d:
                 count += 1
@@ -111,7 +202,6 @@ def count_full_weekends(start_d, end_d):
     return count
 
 def enumerate_date_pairs(route):
-    """根據規則列出所有合格的 (出發日, 回程日) 組合"""
     rng = route['depart_date_range']
     start = date.fromisoformat(rng['start'])
     end = date.fromisoformat(rng['end'])
@@ -144,8 +234,15 @@ def enumerate_date_pairs(route):
 def parse_time_window(s):
     if not s:
         return None
+
+    def parse_bound(value):
+        value = value.strip()
+        if value == '24:00':
+            return time(23, 59, 59)
+        return time.fromisoformat(value)
+
     a, b = s.split('-')
-    return (time.fromisoformat(a.strip()), time.fromisoformat(b.strip()))
+    return (parse_bound(a), parse_bound(b))
 
 def parse_flight_time(s):
     s = s.strip()
@@ -173,7 +270,7 @@ def in_window(t_str, window):
         return True
     return window[0] <= t <= window[1]
 
-# ─────────── fast-flights 包裝 ───────────
+# ─────────── fast-flights ───────────
 
 CABIN_MAP = {
     'economy': 'economy',
@@ -202,13 +299,12 @@ def query_one(origin, dest, depart_date, return_date, cabin):
 
 # ─────────── 主流程 ───────────
 
-def scrape_route(route, lcc_codes, lcc_keywords, conn):
+def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
     if not route.get('active', True):
         log.info(f"路線 #{route['id']} 已暫停，跳過")
         return 0
 
-    log.info(f"開始路線 #{route['id']}：{route['name']}")
-
+    log.info(f"開始路線 #{route['id']}:{route['name']}")
     date_pairs = enumerate_date_pairs(route)
     log.info(f"  合格日期組合：{len(date_pairs)} 個")
     if not date_pairs:
@@ -233,21 +329,18 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn):
                         price_raw = str(getattr(f, 'price', '') or '').strip()
                         if not price_raw:
                             continue
-                        # 嘗試解析價格
                         digits = ''.join(c for c in price_raw if c.isdigit() or c == '.')
                         if not digits:
                             continue
                         price_num = float(digits)
-                        # fast-flights 預設回 USD，沒指定貨幣的話假設 USD → TWD
                         if 'NT' in price_raw or 'TWD' in price_raw:
                             price = int(price_num)
                         else:
-                            price = int(price_num * 32)  # TODO: 接即時匯率
+                            price = int(price_num * fx_rate)
                     except Exception:
                         continue
 
                     airline = (getattr(f, 'name', '') or '').strip()
-                    # 跳過 fast-flights 沒解析出航空公司名稱的航班（資料不完整，不可信）
                     if not airline:
                         continue
                     airline_code = airline[:2].upper() if airline else ''
@@ -256,7 +349,6 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn):
                     depart_time_str = getattr(f, 'departure', '') or ''
                     arrive_time_str = getattr(f, 'arrival', '') or ''
 
-                    # fast-flights 的 stops 可能是 int、"Nonstop"、"1 stop"、"2 stops" 等
                     stops_raw = getattr(f, 'stops', 0)
                     if isinstance(stops_raw, int):
                         stops = stops_raw
@@ -294,24 +386,6 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn):
     log.info(f"  寫入 {written} 筆")
     return written
 
-def reclassify_is_lcc(conn, lcc_codes, lcc_keywords):
-    """重跑所有歷史資料的 is_lcc 分類，讓舊資料能跟著新 LCC 名單修正"""
-    rows = conn.execute('SELECT id, airline_name, airline_code, is_lcc FROM prices').fetchall()
-    changed = 0
-    for id_, name, code, old in rows:
-        new_val = int(is_lcc_flight(name or '', code or '', lcc_codes, lcc_keywords))
-        if new_val != old:
-            conn.execute('UPDATE prices SET is_lcc = ? WHERE id = ?', (new_val, id_))
-            changed += 1
-    conn.commit()
-    log.info(f"重新分類 is_lcc：{changed} / {len(rows)} 筆有變更")
-
-def cleanup_invalid_rows(conn):
-    """清掉 airline_name 空白的舊資料（資料不完整、不可信）"""
-    cur = conn.execute("DELETE FROM prices WHERE airline_name IS NULL OR TRIM(airline_name) = ''")
-    log.info(f"清除空白 airline 舊資料：{cur.rowcount} 筆")
-    conn.commit()
-
 def main():
     log.info("=" * 60)
     log.info("機票爬蟲開始")
@@ -321,14 +395,27 @@ def main():
     lcc_codes, lcc_keywords = load_lcc_config()
     conn = init_db()
 
-    # 維護：清掉空白 airline 的舊資料，並重跑 is_lcc 分類
+    # 維護
     cleanup_invalid_rows(conn)
+    cleanup_old_data(conn)
     reclassify_is_lcc(conn, lcc_codes, lcc_keywords)
+
+    # 即時匯率
+    fx_rate = get_fx_rate()
+
+    # 連續失敗追蹤
+    state = load_state()
 
     total = 0
     for route in routes_data['routes']:
-        total += scrape_route(route, lcc_codes, lcc_keywords, conn)
+        if not route.get('active', True):
+            log.info(f"路線 #{route['id']} 已暫停，跳過")
+            continue
+        written = scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate)
+        update_state(state, route['id'], written)
+        total += written
 
+    save_state(state)
     conn.close()
     log.info(f"全部完成，共寫入 {total} 筆")
 

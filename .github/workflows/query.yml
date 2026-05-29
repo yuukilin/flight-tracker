@@ -1,0 +1,64 @@
+name: Flight Query
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'history / best / chart'
+        type: choice
+        options: [history, best, chart]
+        required: true
+      route_id:
+        description: 'Route ID'
+        type: string
+        required: true
+      chat_id:
+        description: 'Telegram chat id to send result'
+        type: string
+        required: true
+      days:
+        description: 'Days back (for history / chart)'
+        type: string
+        default: '30'
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Restore prices DB cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/prices.db
+            data/scrape_state.json
+            data/last_fx.json
+          key: prices-db-${{ github.run_id }}
+          restore-keys: |
+            prices-db-
+
+      - name: Run query
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ACTION: ${{ inputs.action }}
+          ROUTE_ID: ${{ inputs.route_id }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          DAYS: ${{ inputs.days }}
+        run: |
+          python scripts/query.py \
+            --action "$ACTION" \
+            --route-id "$ROUTE_ID" \
+            --chat-id "$CHAT_ID" \
+            --days "$DAYS"

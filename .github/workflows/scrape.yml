@@ -30,7 +30,10 @@ jobs:
         id: restore-cache
         uses: actions/cache/restore@v4
         with:
-          path: data/prices.db
+          path: |
+            data/prices.db
+            data/scrape_state.json
+            data/last_fx.json
           key: prices-db-${{ github.run_id }}
           restore-keys: |
             prices-db-
@@ -53,7 +56,10 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: data/prices.db
+          path: |
+            data/prices.db
+            data/scrape_state.json
+            data/last_fx.json
           key: prices-db-${{ github.run_id }}
 
       # ── 也上傳成 Artifact 作為備援，可以從 Actions 頁面下載 ──
@@ -65,4 +71,6 @@ jobs:
           path: |
             data/prices.db
             data/analysis.json
+            data/scrape_state.json
+            data/last_fx.json
           retention-days: 30

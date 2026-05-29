@@ -1,7 +1,7 @@
 # Flight Tracker —— 機票追蹤系統專案
 
-> 這個檔給 Claude 看，新對話開始前請先讀完。
-> 寫於 2026-05-27，由勇成（@yuukilin）與 Claude 共同建置。
+> 這個檔給 Codex 看，新對話開始前請先讀完。
+> 寫於 2026-05-27，由勇成（@yuukilin）與 Codex 共同建置。
 
 ---
 
@@ -62,7 +62,7 @@
 
 ```
 flight-tracker/
-├── CLAUDE.md                    ← 你正在看的這份
+├── AGENTS.md                    ← 你正在看的這份
 ├── README.md
 ├── requirements.txt              ← Python 套件
 ├── routes.yaml                   ← 路線設定（手動編輯）
@@ -126,34 +126,29 @@ flight-tracker/
 
 ---
 
-## 五、現在的狀態（2026-05-29 接手更新）
+## 五、現在的狀態（2026-05-27 截止）
 
 ### ✅ 已完成
 1. **階段 0–4**：GitHub repo、Actions 排程、Python scrape pipeline、Telegram 推播全部跑通
 2. **階段 5（Worker）**：Cloudflare Worker 已部署，URL `https://flight-bot.sonyzxcgo7411.workers.dev`
 3. **階段 6（Webhook）**：Telegram webhook 已指向 Worker
 4. **階段 7（指令測試）**：`/help` 已驗證通
-5. Worker 已支援 `/edit`、`/clone`、`/threshold`、`/history`、`/best`、`/chart`
-6. `/add` 已按鈕化，支援城市中文名轉 IATA、欄位驗證與新增前 summary 確認
-7. `notify.py` 已整合資訊化心跳、異常下殺警報、連續失敗警報、多 chat_id
-8. `scrape.py` 已整合即時匯率、舊資料清理、空白 airline 清理、連續失敗狀態
-9. `query.yml` + `scripts/query.py` 已支援 Telegram 查詢歷史最低、每日最低與走勢圖
 
 ### ⏳ 進行中
-- 這批變更尚未 commit / push / deploy；部署後才會反映到 Telegram bot
-- `/history` `/best` `/chart` 需要新的 `query.yml` 先推到 GitHub，Worker 才觸發得到
-- GitHub Actions 第一次跑新版 scrape 後，才會開始保存 `scrape_state.json` 與 `last_fx.json`
+- `/add` `/list` `/scan` `/remove` 等指令的實際測試（user 在做）
+- 第一條真實路線「北海道豪經 9 天 跨 2 週末」的新增
 
 ### 🐛 已知小議題
-- `data/prices.db` 與 `data/analysis.json` 雖已在 `.gitignore`，但目前仍存在於 git 追蹤清單；未來可用 `git rm --cached` 讓 repo 真正停止追蹤這兩個產生物
-- 本機沒有安裝 `matplotlib` 時，`/chart` 乾跑會回友善錯誤；GitHub Actions 會依 `requirements.txt` 安裝
-- 任何 LCC 漏網（傳統航空欄出現廉航名稱）→ 補 `excluded_airlines.yaml` 的 `name_keywords`
+- **149 筆空白 airline**：fast-flights 有時抓不到航空公司名（已在 scrape.py 加 `if not airline: continue` 跳過）
+- **匯率寫死 1 USD = 32 TWD**：未來可接即時匯率 API
+- **下次 scrape 跑完 reclassify_is_lcc 才會修對舊資料**：所以新加 LCC 名單後，要等下一次 Actions 才生效
 
 ### 📋 未來可加（user 想到再做）
+- `/chart <id> <days>`：傳價格走勢圖 PNG
+- `/threshold <id> <level>`：改通知門檻
+- `/history <id>`：看某條路線過去 7 天最低價
+- 即時匯率
 - 中華電信簡訊備援（Telegram 掛了用）
-- 多日掃描去重（避免一樣的票每天通知）
-- 旅遊旺季標籤（日本黃金週、台灣連假自動跳警告）
-- 廉航行李費估算欄
 
 ---
 
@@ -218,7 +213,7 @@ wrangler secret list
 
 ---
 
-## 八、使用者偏好（從 global CLAUDE.md）
+## 八、使用者偏好（從 global AGENTS.md）
 
 - **語言**：繁體中文，不可簡體、不可中國大陸用語
 - **解釋**：科技/理組討論用高中生能聽懂的方式
@@ -230,9 +225,9 @@ wrangler secret list
 
 ---
 
-## 九、給接手 Claude 的話
+## 九、給接手 Codex 的話
 
-1. **先讀這份 CLAUDE.md 全文**，再做任何事
+1. **先讀這份 AGENTS.md 全文**，再做任何事
 2. 確認 user 連的資料夾就是 `/Users/yuukilin/Desktop/python/flight-tracker/`
 3. 修改任何檔案前看一下 `git log --oneline -10` 了解最近改了什麼
 4. push 衝突的處理已經在「資料持久化」設計裡解決，user 本地 push 應該永遠不衝突
