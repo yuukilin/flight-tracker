@@ -120,16 +120,19 @@ def send_text(chat_id, text, buttons=None):
     resp.raise_for_status()
 
 
-def send_photo(chat_id, png_path, caption=''):
+def send_photo(chat_id, png_path, caption='', buttons=None):
     if not TOKEN:
         print(f"[no token] would send photo {png_path}: {caption}")
         return
     import requests
 
+    data = {'chat_id': chat_id, 'caption': caption}
+    if buttons:
+        data['reply_markup'] = json.dumps({'inline_keyboard': buttons}, ensure_ascii=False)
     with open(png_path, 'rb') as f:
         resp = requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-            data={'chat_id': chat_id, 'caption': caption},
+            data=data,
             files={'photo': f},
             timeout=60,
         )
@@ -237,13 +240,17 @@ def action_history(rid, days, chat_id):
         counts[d] = counts.get(d, 0) + 1
 
     if not daily:
-        send_text(chat_id, f"#{rid} {name}\n過去 {days} 天沒有傳統航空資料。")
+        buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
+        send_text(chat_id, f"#{rid} {name}\n過去 {days} 天沒有傳統航空資料。", buttons=buttons)
         return
 
     lines = [f"#{rid} {name}", f"過去 {days} 天每日最低（傳統航空）"]
     for d in sorted(daily.keys(), reverse=True):
         lines.append(f"{d}：NT$ {daily[d]:,}（{counts[d]} 筆）")
-    send_text(chat_id, '\n'.join(lines))
+    lines.append("")
+    lines.append("可用下方按鈕重新開 Google Flights 查目前票價。")
+    buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
+    send_text(chat_id, '\n'.join(lines), buttons=buttons)
 
 
 def action_best(rid, chat_id, limit=5):
@@ -325,7 +332,8 @@ def action_chart(rid, days, chat_id):
         daily[d] = min(price, daily.get(d, price))
 
     if not daily:
-        send_text(chat_id, f"#{rid} {name}\n過去 {days} 天沒有傳統航空資料可畫。")
+        buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
+        send_text(chat_id, f"#{rid} {name}\n過去 {days} 天沒有傳統航空資料可畫。", buttons=buttons)
         return
 
     dates = sorted(daily.keys())
@@ -345,7 +353,8 @@ def action_chart(rid, days, chat_id):
     plt.close(fig)
 
     caption = f"#{rid} {name}\n過去 {days} 天最低價走勢（傳統航空）"
-    send_photo(chat_id, out, caption=caption)
+    buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
+    send_photo(chat_id, out, caption=caption, buttons=buttons)
 
 
 def action_debug(rid, chat_id):

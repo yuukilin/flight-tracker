@@ -138,6 +138,13 @@ const CABIN_VAL_TO_LABEL = Object.fromEntries(
   Object.entries(CABIN_LABEL_TO_VAL).map(([k, v]) => [v, k])
 );
 
+const CABIN_QUERY_LABEL = {
+  economy: 'economy',
+  premium_economy: 'premium economy',
+  business: 'business class',
+  first: 'first class',
+};
+
 // 通知門檻按鈕
 const THRESHOLD_LABEL_TO_VAL = {
   '便宜才通知 cheap': 'cheap',
@@ -556,6 +563,16 @@ function cabinShortLabel(cabins) {
     first: '頭等',
   };
   return (cabins || []).map((c) => labels[c] || c).join('/');
+}
+
+function googleFlightsUrl(route) {
+  const origin = route.origin || '';
+  const dest = (route.destinations || [''])[0];
+  const cabin = CABIN_QUERY_LABEL[(route.cabin_classes || ['economy'])[0]] || 'economy';
+  const start = route.depart_date_range?.start || '';
+  const end = route.depart_date_range?.end || '';
+  const query = `Flights from ${origin} to ${dest} ${start} ${end} ${cabin}`;
+  return `https://www.google.com/travel/flights?q=${encodeURIComponent(query)}`;
 }
 
 function buildAddRoute(id, data) {
@@ -1582,6 +1599,9 @@ function routeButtons(route) {
     : { text: '暫停追蹤', callback_data: `pause:${id}` };
   return inlineKbOpts([
     [
+      { text: '開 Google Flights', url: googleFlightsUrl(route) },
+    ],
+    [
       { text: '每日最低', callback_data: `history:${id}` },
       { text: '走勢圖', callback_data: `chart:${id}` },
     ],
@@ -1797,6 +1817,7 @@ async function cmdList(env, chatId) {
   lines.push('點下面路線可以直接操作。');
   const buttons = data.routes.map((r) => [
     { text: `操作 #${r.id} ${r.name}`, callback_data: `route:${r.id}` },
+    { text: '查票', url: googleFlightsUrl(r) },
   ]);
   await sendMsg(env, chatId, lines.join('\n'), inlineKbOpts(buttons));
 }
