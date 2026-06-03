@@ -1359,6 +1359,7 @@ async function handleCommand(env, chatId, text) {
     case '/clone':
       return cmdClone(env, chatId, parseInt(args[0]));
     case '/remove':
+      if (!args[0]) return cmdRemovePicker(env, chatId);
       return cmdRemove(env, chatId, parseInt(args[0]));
     case '/pause':
       return cmdToggleActive(env, chatId, parseInt(args[0]), false);
@@ -1887,6 +1888,7 @@ async function handleCallback(env, cb) {
   const [action, rawId, rawValue] = data.split(':');
   const id = parseInt(rawId);
 
+  if (action === 'menu') return cmdMenu(env, chatId);
   if (action === 'scan') return cmdScan(env, chatId);
   if (action === 'history') return cmdQuery(env, chatId, 'history', id, 30);
   if (action === 'best') return cmdQuery(env, chatId, 'best', id, 30);
@@ -1953,17 +1955,22 @@ async function cmdList(env, chatId) {
     const cabins = cabinText(r.cabin_classes);
     const dests = (r.destinations || []).join('/');
     lines.push('────────────');
-    lines.push(`${status}｜#${r.id} ${r.name}`);
+    lines.push(`${status}｜${r.name}`);
+    lines.push(`ID：#${r.id}`);
     lines.push(`${r.origin} → ${dests}｜${cabins}`);
     lines.push(`${r.depart_date_range?.start} ~ ${r.depart_date_range?.end}｜${r.trip_duration_days} 天`);
     lines.push(`通知：${r.notify_threshold}`);
     lines.push('');
   }
-  lines.push('下方每條路線都有「操作」和「查票」。');
-  const buttons = data.routes.map((r) => [
-    { text: `操作 #${r.id} ${r.name}`, callback_data: `route:${r.id}` },
-    { text: '查票', url: googleFlightsUrl(r) },
-  ]);
+  lines.push('下方每條路線都有「操作」「查票」「刪除」。');
+  const buttons = [];
+  for (const r of data.routes) {
+    buttons.push([
+      { text: `操作 #${r.id}`, callback_data: `route:${r.id}` },
+      { text: '查票', url: googleFlightsUrl(r) },
+      { text: '刪除', callback_data: `remove:${r.id}` },
+    ]);
+  }
   await sendMsg(env, chatId, lines.join('\n'), inlineKbOpts(buttons));
 }
 
@@ -1977,13 +1984,31 @@ async function cmdShow(env, chatId, id) {
 }
 
 async function cmdRemove(env, chatId, id) {
-  if (isNaN(id)) return sendMsg(env, chatId, '用法：/remove <id>');
+  if (isNaN(id)) return cmdRemovePicker(env, chatId);
   const { data, sha } = await loadRoutes(env);
   const idx = data.routes.findIndex((x) => x.id === id);
   if (idx < 0) return sendMsg(env, chatId, `找不到 #${id}`);
   const removed = data.routes.splice(idx, 1)[0];
   await saveRoutes(env, data, sha, `Remove route #${id} via bot`);
   await sendMsg(env, chatId, `已刪除 #${id}：${removed.name}`, removeKbOpts());
+}
+
+async function cmdRemovePicker(env, chatId) {
+  const { data } = await loadRoutes(env);
+  if (data.routes.length === 0) {
+    return sendMsg(env, chatId, '目前沒有路線可刪除。', mainMenuOpts());
+  }
+  const lines = [
+    '🗑 選一條要刪除的路線',
+    '',
+    '不用記 ID，直接點下面按鈕。',
+    '點了之後還會再問一次確認，不會馬上刪。',
+  ];
+  const buttons = data.routes.map((r) => [
+    { text: `刪除 #${r.id} ${r.name}`, callback_data: `remove:${r.id}` },
+  ]);
+  buttons.push([{ text: '取消', callback_data: 'menu' }]);
+  return sendMsg(env, chatId, lines.join('\n'), inlineKbOpts(buttons));
 }
 
 async function cmdToggleActive(env, chatId, id, active) {

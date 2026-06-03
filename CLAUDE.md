@@ -22,6 +22,7 @@
 - GitHub Actions 掃描後會產出 `data/status.json`，並同步到 Cloudflare KV，供 `/menu` 即時讀取。
 - 通知已加入去重：同一條路線若價格沒有更低、狀態沒有變好、最低組合沒有變化，就不再重複當成新提醒。
 - Telegram 輸出已改成「閱讀優先級 → 重點 → 路線細節」：第一行會顯示必看、值得看、檢查一下或可略過。
+- `/remove` 不帶 ID 時會顯示可點選刪除清單；`/list` 也會明確標示 `ID：#n` 並提供刪除按鈕。
 - `data/prices.db`、`data/analysis.json` 已改成只由 Actions cache / artifact 管理，不再放進 git 追蹤。
 - 目前購票入口以 Google Flights 精準查詢為主；航空公司按鈕使用「官網搜尋」入口，避免硬寫可能過期的結帳網址。
 - 任何功能、部署、排查、測試或狀態進度有更新，都要同步回寫 `CLAUDE.md` 和 `HANDOFF.md`。
@@ -167,6 +168,7 @@ flight-tracker/
 17. Telegram 通知已改成閱讀優先級優先：必看 / 值得看 / 檢查一下 / 可略過，並附 Google Flights 查票按鈕與航空公司官網搜尋入口
 18. `/menu` 已改成首頁狀態面板，讀取 Worker KV 的最新掃描狀態
 19. `notified_state.json` 已加入通知去重，避免同價格或同狀態重複提醒
+20. `/remove` 已改成不用記 ID；沒帶 ID 時會顯示刪除選單，`/list` 每條路線也有刪除按鈕
 
 ### ⏳ 進行中
 - 觀察下一次 GitHub Actions 實跑後，確認 `/menu` 是否成功顯示最新 `status.json`。
