@@ -30,6 +30,7 @@ const HELP_TEXT = `機票追蹤 Bot
 
 提示：
 • 不想背指令就輸入 /menu
+• 需要路線的功能都可以不帶 ID，例如 /edit、/remove、/history，Bot 會跳出路線清單讓你點
 • 可直接打：我想明年10月到12月去札幌，豪經，9天，跨兩個週末
 • /add 是快速新增：目的地、出發地、日期、天數、艙等、週末、通知
 • 日期可以輸入 10/1-12/31、10月到12月、賞楓、寒假
@@ -1350,33 +1351,44 @@ async function handleCommand(env, chatId, text) {
     case '/list':
       return cmdList(env, chatId);
     case '/show':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'show');
       return cmdShow(env, chatId, parseInt(args[0]));
     case '/add':
       if (args.length > 0) return cmdAddFromSentence(env, chatId, args.join(' '), true);
       return cmdAddStart(env, chatId);
     case '/edit':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'edit_route');
+      if (!args[1]) return cmdRouteEditMenu(env, chatId, parseInt(args[0]));
       return cmdEdit(env, chatId, parseInt(args[0]), args[1], args.slice(2).join(' '));
     case '/clone':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'clone');
       return cmdClone(env, chatId, parseInt(args[0]));
     case '/remove':
       if (!args[0]) return cmdRemovePicker(env, chatId);
       return cmdRemove(env, chatId, parseInt(args[0]));
     case '/pause':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'pause');
       return cmdToggleActive(env, chatId, parseInt(args[0]), false);
     case '/resume':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'resume');
       return cmdToggleActive(env, chatId, parseInt(args[0]), true);
     case '/threshold':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'threshold');
       return cmdThreshold(env, chatId, parseInt(args[0]), args[1]);
     case '/scan':
       return cmdScan(env, chatId);
     case '/history':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'history');
       return cmdQuery(env, chatId, 'history', parseInt(args[0]), normalizeDays(parseInt(args[1]) || 30));
     case '/best':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'best');
       return cmdQuery(env, chatId, 'best', parseInt(args[0]), 30);
     case '/chart':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'chart');
       return cmdQuery(env, chatId, 'chart', parseInt(args[0]), normalizeDays(parseInt(args[1]) || 30));
     case '/debug':
     case '/last':
+      if (!args[0]) return sendRoutePicker(env, chatId, 'debug');
       return cmdQuery(env, chatId, 'debug', parseInt(args[0]), 30);
     case '/cancel':
       await env.STATE.delete(`dlg:${chatId}`);
@@ -1388,9 +1400,8 @@ async function handleCommand(env, chatId, text) {
 
 // ─── /threshold ───
 async function cmdThreshold(env, chatId, id, level) {
-  if (isNaN(id) || !level) {
-    return sendMsg(env, chatId, '用法：/threshold <id> <cheap|good|any>');
-  }
+  if (isNaN(id)) return sendRoutePicker(env, chatId, 'threshold');
+  if (!level) return sendThresholdPicker(env, chatId, id);
   const lvl = level.toLowerCase();
   if (!['cheap', 'good', 'any'].includes(lvl)) {
     return sendMsg(env, chatId, '門檻須為 cheap / good / any');
@@ -1404,9 +1415,26 @@ async function cmdThreshold(env, chatId, id, level) {
   await sendMsg(env, chatId, `#${id} 通知門檻已更新：${old} → ${lvl}`, removeKbOpts());
 }
 
+async function sendThresholdPicker(env, chatId, id) {
+  const { data } = await loadRoutes(env);
+  const route = data.routes.find((x) => x.id === id);
+  if (!route) return sendMsg(env, chatId, `找不到 #${id}`);
+  return sendMsg(
+    env,
+    chatId,
+    `🔔 #${id} ${route.name}\n要什麼情況通知？\n\ncheap：真的便宜才通知\ngood：不錯就通知\nany：每次掃描都通知`,
+    inlineKbOpts([
+      [{ text: 'cheap｜便宜才通知', callback_data: `set_threshold:${id}:cheap` }],
+      [{ text: 'good｜不錯就通知', callback_data: `set_threshold:${id}:good` }],
+      [{ text: 'any｜每次都通知', callback_data: `set_threshold:${id}:any` }],
+      [{ text: '回路線面板', callback_data: `route:${id}` }],
+    ])
+  );
+}
+
 // ─── /clone ───
 async function cmdClone(env, chatId, id) {
-  if (isNaN(id)) return sendMsg(env, chatId, '用法：/clone <id>');
+  if (isNaN(id)) return sendRoutePicker(env, chatId, 'clone');
   const { data, sha } = await loadRoutes(env);
   const src = data.routes.find((x) => x.id === id);
   if (!src) return sendMsg(env, chatId, `找不到 #${id}`);
@@ -1673,6 +1701,8 @@ function applyRouteEditValue(route, field, value) {
 
 async function cmdEdit(env, chatId, id, field, value) {
   if (isNaN(id) || !field || !value) {
+    if (isNaN(id)) return sendRoutePicker(env, chatId, 'edit_route');
+    if (!field) return cmdRouteEditMenu(env, chatId, id);
     const list = Object.keys(EDIT_FIELD_HANDLERS).join(' / ');
     return sendMsg(env, chatId, `用法：/edit <id> <field> <value>\n\n支援欄位：${list}\n例：/edit 1 threshold any`);
   }
@@ -1695,7 +1725,7 @@ async function cmdEdit(env, chatId, id, field, value) {
 
 // ─── /history /best /chart 觸發 query.yml ───
 async function cmdQuery(env, chatId, action, id, days) {
-  if (isNaN(id)) return sendMsg(env, chatId, `用法：/${action} <id> [days]`);
+  if (isNaN(id)) return sendRoutePicker(env, chatId, action);
   const { data } = await loadRoutes(env);
   const route = data.routes.find((x) => x.id === id);
   if (!route) return sendMsg(env, chatId, `找不到 #${id}`);
@@ -1728,6 +1758,12 @@ async function handleMenuText(env, chatId, text) {
   if (t.includes('我的路線') || t.includes('路線')) return cmdList(env, chatId);
   if (t.includes('掃描')) return cmdScan(env, chatId);
   if (t.includes('說明') || t.includes('help')) return sendMsg(env, chatId, HELP_TEXT, mainMenuOpts());
+  if (t.includes('修改') || t.includes('編輯')) return sendRoutePicker(env, chatId, 'edit_route');
+  if (t.includes('刪除')) return cmdRemovePicker(env, chatId);
+  if (t.includes('暫停')) return sendRoutePicker(env, chatId, 'pause');
+  if (t.includes('恢復')) return sendRoutePicker(env, chatId, 'resume');
+  if (t.includes('通知')) return sendRoutePicker(env, chatId, 'threshold');
+  if (t.includes('檢查') || t.includes('診斷')) return sendRoutePicker(env, chatId, 'debug');
   if (t.includes('歷史最低') || t.includes('最低')) return sendRoutePicker(env, chatId, 'best');
   if (t.includes('價格走勢') || t.includes('走勢') || t.includes('圖')) return sendRoutePicker(env, chatId, 'chart');
   return sendMsg(env, chatId, '我看不懂這句。你可以點下面按鈕，或輸入 /help。', mainMenuOpts());
@@ -1805,16 +1841,37 @@ async function sendRoutePicker(env, chatId, action) {
   }
   const title = {
     show: '要看哪一條路線？',
+    edit_route: '要修改哪一條路線？',
+    clone: '要複製哪一條路線？',
+    remove: '要刪除哪一條路線？',
+    pause: '要暫停哪一條路線？',
+    resume: '要恢復哪一條路線？',
+    threshold: '要修改哪一條路線的通知？',
     history: '要查哪一條路線的每日最低？',
     best: '要查哪一條路線的歷史最低？',
     chart: '要看哪一條路線的走勢圖？',
+    debug: '要檢查哪一條路線的抓取？',
   }[action] || '要選哪一條路線？';
+  const prefix = {
+    show: '查看',
+    edit_route: '修改',
+    clone: '複製',
+    remove: '刪除',
+    pause: '暫停',
+    resume: '恢復',
+    threshold: '通知',
+    history: '每日最低',
+    best: '歷史最低',
+    chart: '走勢圖',
+    debug: '檢查',
+  }[action] || '選擇';
   const rows = data.routes.map((r) => [
     {
-      text: `#${r.id} ${r.name}`,
+      text: `${prefix} #${r.id} ${r.name}`,
       callback_data: `${action}:${r.id}`,
     },
   ]);
+  rows.push([{ text: '取消', callback_data: 'menu' }]);
   return sendMsg(env, chatId, title, inlineKbOpts(rows));
 }
 
@@ -1844,7 +1901,7 @@ function routeEditFieldOpts(choice) {
 }
 
 async function cmdRouteEditMenu(env, chatId, id, messageId = null) {
-  if (isNaN(id)) return sendMsg(env, chatId, '找不到這條路線');
+  if (isNaN(id)) return sendRoutePicker(env, chatId, 'edit_route');
   const { data } = await loadRoutes(env);
   const route = data.routes.find((x) => x.id === id);
   if (!route) return sendMsg(env, chatId, `找不到 #${id}`);
@@ -1899,18 +1956,7 @@ async function handleCallback(env, cb) {
   if (action === 'clone') return cmdClone(env, chatId, id);
   if (action === 'edit_route') return cmdRouteEditMenu(env, chatId, id, messageId);
   if (action === 'edit_field') return startRouteEditField(env, chatId, id, rawValue);
-  if (action === 'threshold') {
-    return sendMsg(
-      env,
-      chatId,
-      `#${id} 要什麼情況通知？`,
-      inlineKbOpts([
-        [{ text: '便宜才通知', callback_data: `set_threshold:${id}:cheap` }],
-        [{ text: '不錯就通知', callback_data: `set_threshold:${id}:good` }],
-        [{ text: '每次都通知', callback_data: `set_threshold:${id}:any` }],
-      ])
-    );
-  }
+  if (action === 'threshold') return sendThresholdPicker(env, chatId, id);
   if (action === 'set_threshold') return cmdThreshold(env, chatId, id, rawValue);
   if (action === 'remove') {
     return sendMsg(
@@ -1975,7 +2021,7 @@ async function cmdList(env, chatId) {
 }
 
 async function cmdShow(env, chatId, id) {
-  if (isNaN(id)) return sendMsg(env, chatId, '用法：/show <id>');
+  if (isNaN(id)) return sendRoutePicker(env, chatId, 'show');
   const { data } = await loadRoutes(env);
   const r = data.routes.find((x) => x.id === id);
   if (!r) return sendMsg(env, chatId, `找不到 #${id}`);
@@ -2012,7 +2058,7 @@ async function cmdRemovePicker(env, chatId) {
 }
 
 async function cmdToggleActive(env, chatId, id, active) {
-  if (isNaN(id)) return sendMsg(env, chatId, `用法：/${active ? 'resume' : 'pause'} <id>`);
+  if (isNaN(id)) return sendRoutePicker(env, chatId, active ? 'resume' : 'pause');
   const { data, sha } = await loadRoutes(env);
   const r = data.routes.find((x) => x.id === id);
   if (!r) return sendMsg(env, chatId, `找不到 #${id}`);
