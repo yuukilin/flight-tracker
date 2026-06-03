@@ -16,13 +16,13 @@
 - 使用者完全用 Telegram bot 管理路線（/add /list /remove /scan）
 - 不放 VPS，全部跑在 GitHub Actions + Cloudflare Workers
 
-**新對話接手重點（2026-05-29 更新）：**
-- 最新程式已 push / deploy，commit：`2467215 Improve Telegram bot menu and add flow`
-- Cloudflare 最新部署時間：2026-05-29 17:24:14 台北時間
-- Telegram bot 現在已有 `/menu` 主選單、路線操作按鈕、快速 `/add`
-- `/add` 日期已支援 `10/1-12/31`、`10月到12月`、`明年10月到12月`、`賞楓`、`寒假`、`暑假`、`跨年`
-- 下一輪請先看 `HANDOFF.md` 第九章「下一輪優化 Roadmap」
-- 下一個最重要目標：一句話新增路線，例如「我想明年10月到12月去札幌，豪經，9天，跨兩個週末」
+**新對話接手重點（2026-06-03 更新）：**
+- Telegram bot 已支援一句話新增、按鈕修改路線、抓取診斷、Google Flights 查票按鈕。
+- `/menu` 已改成狀態面板：顯示上次掃描、寫入筆數、各路線最低價、資料量、下次排程。
+- GitHub Actions 掃描後會產出 `data/status.json`，並同步到 Cloudflare KV，供 `/menu` 即時讀取。
+- 通知已加入去重：同一條路線若價格沒有更低、狀態沒有變好、最低組合沒有變化，就不再重複當成新提醒。
+- `data/prices.db`、`data/analysis.json` 已改成只由 Actions cache / artifact 管理，不再放進 git 追蹤。
+- 目前購票入口以 Google Flights 精準查詢為主；航空公司按鈕使用「官網搜尋」入口，避免硬寫可能過期的結帳網址。
 
 ---
 
@@ -56,11 +56,12 @@
             ▼ cron 09:00 / 21:00 (台北)         │ commit data
 ┌────────────────────────────────────────────────────────────────┐
 │  GitHub Actions (.github/workflows/scrape.yml)                 │
-│  1. Restore prices.db from cache                               │
+│  1. Restore prices.db / 狀態檔 from cache                       │
 │  2. scrape.py: fast-flights 抓 Google Flights                  │
 │  3. analyze.py: 算歷史百分位                                    │
-│  4. notify.py: 推 Telegram 訊息                                │
-│  5. Save prices.db to cache + upload Artifact                  │
+│  4. notify.py: 推 Telegram、寫 status.json、更新去重狀態         │
+│  5. 同步 status 到 Worker KV，供 /menu 讀取                     │
+│  6. Save cache + upload Artifact                               │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,13 +80,21 @@ flight-tracker/
 ├── .gitignore                    ← 排除 data/prices.db, data/analysis.json
 ├── .github/
 │   └── workflows/
-│       └── scrape.yml            ← Actions 排程：cron 0 1,13 * * *（UTC）
+│       ├── scrape.yml            ← Actions 排程：cron 0 1,13 * * *（UTC）
+│       └── query.yml             ← Telegram 查詢 history / best / chart / debug
 ├── data/
-│   └── .gitkeep                  ← 空資料夾佔位（prices.db 不入 git）
+│   ├── .gitkeep                  ← 空資料夾佔位
+│   ├── prices.db                 ← 不入 git；Actions cache / artifact 保存
+│   ├── analysis.json             ← 不入 git；每次 analyze 產出
+│   ├── status.json               ← 不入 git；/menu 狀態面板資料
+│   ├── notified_state.json       ← 不入 git；通知去重狀態
+│   ├── scrape_state.json         ← 不入 git；連續失敗與上次抓取狀態
+│   └── last_fx.json              ← 不入 git；匯率 cache
 ├── scripts/
 │   ├── scrape.py                 ← 主爬蟲（含 reclassify_is_lcc, cleanup_invalid_rows）
 │   ├── analyze.py                ← 百分位分析
-│   └── notify.py                 ← Telegram 推播
+│   ├── notify.py                 ← Telegram 推播、狀態檔、通知去重
+│   └── query.py                  ← /history /best /chart /debug 查詢
 └── worker/
     ├── wrangler.toml             ← Cloudflare Worker 設定（含 KV id）
     ├── README.md
@@ -134,7 +143,7 @@ flight-tracker/
 
 ---
 
-## 五、現在的狀態（2026-05-29 已上線更新）
+## 五、現在的狀態（2026-06-03 已上線更新）
 
 ### ✅ 已完成
 1. **階段 0–4**：GitHub repo、Actions 排程、Python scrape pipeline、Telegram 推播全部跑通
@@ -149,21 +158,25 @@ flight-tracker/
 10. `/menu` 主選單已上線，路線列表可點按鈕進操作面板
 11. 路線操作面板已支援每日最低、走勢圖、歷史最低、立即掃描、暫停/恢復、改通知、複製、刪除
 12. `/add` 已改成快速新增：目的地、出發地、日期、天數、艙等、週末、通知標準
-13. `/add` 人話日期已支援：`10/1-12/31`、`10月到12月`、`明年10月到12月`、`賞楓`、`寒假`、`暑假`、`跨年`
+13. `/add` 人話日期已支援：`10/1-12/31`、`10月到12月`、`明年10月到12月`、`賞楓`、`滑雪`、`寒假`、`暑假`、`跨年`
+14. 一句話新增路線已支援，例如「我想明年10月到12月去札幌，豪經，9天，跨兩個週末」
+15. 路線設定已支援按鈕修改：目的地、出發地、日期、天數、艙等、週末、轉機、預算、通知、名稱、去回程時段
+16. `/debug` / `/last` 已支援抓取診斷，可核對路線設定與最新資料庫分布是否一致
+17. Telegram 通知已改成結論優先、少圖示、附 Google Flights 查票按鈕與航空公司官網搜尋入口
+18. `/menu` 已改成首頁狀態面板，讀取 Worker KV 的最新掃描狀態
+19. `notified_state.json` 已加入通知去重，避免同價格或同狀態重複提醒
 
 ### ⏳ 進行中
-- 下一輪要繼續把整體 Telegram bot 從「指令工具」改成「旅行助理」
-- 優先做「一句話新增路線」
-- 再做「修改路線全按鈕化」與 `/menu` 首頁狀態面板
+- 觀察下一次 GitHub Actions 實跑後，確認 `/menu` 是否成功顯示最新 `status.json`。
+- 若 Telegram 通知仍太長，可再把 heartbeat 摘要壓縮成只列變化路線。
 
 ### 🐛 已知小議題
-- `data/prices.db` 與 `data/analysis.json` 雖已在 `.gitignore`，但目前仍存在於 git 追蹤清單；未來可用 `git rm --cached` 讓 repo 真正停止追蹤這兩個產生物
 - 本機沒有安裝 `matplotlib` 時，`/chart` 乾跑會回友善錯誤；GitHub Actions 會依 `requirements.txt` 安裝
 - 任何 LCC 漏網（傳統航空欄出現廉航名稱）→ 補 `excluded_airlines.yaml` 的 `name_keywords`
+- fast-flights 不提供真正的航空公司結帳網址，所以 bot 不硬寫購票頁；目前提供 Google Flights 查詢與航空公司官網搜尋入口
 
 ### 📋 未來可加（user 想到再做）
 - 中華電信簡訊備援（Telegram 掛了用）
-- 多日掃描去重（避免一樣的票每天通知）
 - 旅遊旺季標籤（日本黃金週、台灣連假自動跳警告）
 - 廉航行李費估算欄
 

@@ -7,6 +7,11 @@
   TELEGRAM_BOT_TOKEN  必填
   TELEGRAM_CHAT_ID    必填（可逗號分隔多個 chat_id）
   SEND_HEARTBEAT      '1' 時即使沒達門檻也送完整心跳；'0' 時只在達門檻時送
+  STATUS_WEBHOOK_URL  選填；設定後會把 data/status.json 同步到 Worker KV
+
+產出檔：
+  data/status.json          /menu 狀態面板用
+  data/notified_state.json  避免同一價格或同一事件重複通知
 """
 
 import os
@@ -29,9 +34,12 @@ ROUTES_YAML = ROOT / 'routes.yaml'
 ROUTES_JSON = ROOT / 'routes.json'
 ANALYSIS_JSON = ROOT / 'data' / 'analysis.json'
 SCRAPE_STATE_JSON = ROOT / 'data' / 'scrape_state.json'
+STATUS_JSON = ROOT / 'data' / 'status.json'
+NOTIFIED_STATE_JSON = ROOT / 'data' / 'notified_state.json'
 
 TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_IDS = [c.strip() for c in os.environ['TELEGRAM_CHAT_ID'].split(',') if c.strip()]
+STATUS_WEBHOOK_URL = os.environ.get('STATUS_WEBHOOK_URL', '').strip()
 
 # 異常下殺：今日 vs 上次最低價跌幅超過此 % 會獨立警報（無視 notify_threshold）
 ANOMALY_DROP_PCT = -20.0
@@ -53,6 +61,14 @@ STATUS_EXPLAIN = {
     'normal': '接近歷史常見區間，不急。',
     'expensive': '高於歷史常見區間，除非行程剛需，否則先等等。',
     'insufficient_data': '歷史資料還不夠，現在只能看「有沒有票」和「今天最低價」。',
+}
+
+STATUS_RANK = {
+    'cheap': 0,
+    'good': 1,
+    'normal': 2,
+    'expensive': 3,
+    'insufficient_data': 9,
 }
 
 CABIN_LABEL = {
@@ -78,6 +94,23 @@ def load_routes():
             return {r['id']: r for r in json.load(f)['routes']}
     with open(ROUTES_YAML, 'r', encoding='utf-8') as f:
         return {r['id']: r for r in yaml.safe_load(f)['routes']}
+
+
+def load_json(path, fallback):
+    if not path.exists():
+        return fallback
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        log.warning(f"{path.name} 讀取失敗，改用空狀態：{e}")
+        return fallback
+
+
+def save_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ─────────── 門檻判斷 ───────────
@@ -177,6 +210,12 @@ def google_flights_url(route, depart_date=None, return_date=None, destination=No
     return "https://www.google.com/travel/flights?q=" + quote_plus(query)
 
 
+def airline_search_url(airline_name):
+    if not airline_name:
+        return None
+    return "https://www.google.com/search?q=" + quote_plus(f"{airline_name} official site booking")
+
+
 def get_best_traditional_flight(conn, route_id, today_str):
     rows = get_top_flights(conn, route_id, today_str, is_lcc=0, limit=1)
     return rows[0] if rows else None
@@ -190,31 +229,98 @@ def build_link_buttons(conn, analyses, routes, today_str):
             continue
         best = get_best_traditional_flight(conn, a['route_id'], today_str)
         if best:
-            _, dd, rd, _, _, _, dest = best
+            airline, dd, rd, _, _, _, dest = best
             url = google_flights_url(route, dd, rd, dest)
         else:
+            airline = ''
             url = google_flights_url(route)
-        rows.append([{'text': f"#{a['route_id']} 開 Google Flights", 'url': url}])
+        row = [{'text': f"#{a['route_id']} Google Flights", 'url': url}]
+        airline_url = airline_search_url(airline)
+        if airline_url:
+            row.append({'text': '搜尋航空公司官網', 'url': airline_url})
+        rows.append(row)
     return rows
 
 
 # ─────────── 訊息組裝 ───────────
 
-def collect_notify_ids(analyses, routes):
-    """挑出達 notify_threshold 的路線 id"""
-    notify_ids = set()
+def analysis_status(a):
+    analysis = a.get('analysis_90') or a.get('analysis_30') or ['insufficient_data', '']
+    return analysis[0], analysis[1] if len(analysis) > 1 else ''
+
+
+def best_flight_dict(row, route=None):
+    if not row:
+        return None
+    airline, dd, rd, price, depart_time, stops, dest = row
+    out = {
+        'airline_name': airline,
+        'depart_date': dd,
+        'return_date': rd,
+        'price_twd': price,
+        'depart_time': depart_time,
+        'stops': stops,
+        'destination': dest,
+    }
+    if route:
+        out['google_flights_url'] = google_flights_url(route, dd, rd, dest)
+        out['airline_search_url'] = airline_search_url(airline)
+    return out
+
+
+def flight_signature(best, today_min):
+    if not best:
+        return f"price:{today_min}"
+    airline, dd, rd, price, _, stops, dest = best
+    return '|'.join(str(x) for x in [airline, dd, rd, price, stops, dest])
+
+
+def collect_price_events(conn, analyses, routes, today_str, notified_state):
+    """只挑出真的需要再次提醒的票價事件，避免同價位每天重複通知。"""
+    events = []
+    route_states = notified_state.setdefault('routes', {})
     for a in analyses:
         route = routes.get(a['route_id'])
         if not route:
             continue
         if a.get('today_min') is None:
             continue
-        analysis = a.get('analysis_90') or a.get('analysis_30') or ['insufficient_data', '']
-        status = analysis[0]
+        status, _ = analysis_status(a)
         threshold = route.get('notify_threshold', 'cheap')
-        if should_notify(threshold, status):
-            notify_ids.add(a['route_id'])
-    return notify_ids
+        if not should_notify(threshold, status):
+            continue
+
+        rid = str(a['route_id'])
+        previous = route_states.get(rid, {})
+        today_min = int(a['today_min'])
+        prev_min = previous.get('last_min_price_twd')
+        prev_status = previous.get('last_status')
+        best = get_best_traditional_flight(conn, a['route_id'], today_str)
+        signature = flight_signature(best, today_min)
+        reason = None
+
+        if prev_min is None:
+            reason = '首次達通知門檻'
+        elif today_min < int(prev_min):
+            diff = int(prev_min) - today_min
+            pct = diff / int(prev_min) * 100 if prev_min else 0
+            reason = f"比上次通知低 {money(diff)}（-{pct:.1f}%）"
+        elif STATUS_RANK.get(status, 99) < STATUS_RANK.get(prev_status, 99):
+            reason = f"狀態變好：{STATUS_LABEL.get(prev_status, prev_status)} → {STATUS_LABEL.get(status, status)}"
+        elif threshold == 'any' and signature != previous.get('last_signature'):
+            reason = '最低組合有變化'
+
+        if reason:
+            events.append({
+                'id': a['route_id'],
+                'name': route.get('name', a.get('route_name', f"#{a['route_id']}")),
+                'reason': reason,
+                'status': status,
+                'today_min': today_min,
+                'best': best_flight_dict(best, route),
+                'signature': signature,
+            })
+    return events
 
 
 def load_scrape_state():
@@ -227,9 +333,10 @@ def load_scrape_state():
         return {}
 
 
-def collect_anomaly_alerts(conn, analyses, routes, today_str):
+def collect_anomaly_alerts(conn, analyses, routes, today_str, notified_state):
     """跌幅 ≥ ANOMALY_DROP_PCT 的路線（無視 threshold）"""
     alerts = []
+    route_states = notified_state.setdefault('routes', {})
     for a in analyses:
         if a.get('today_min') is None:
             continue
@@ -240,6 +347,10 @@ def collect_anomaly_alerts(conn, analyses, routes, today_str):
         diff = today_min - yest
         pct = diff / yest * 100
         if pct <= ANOMALY_DROP_PCT:
+            signature = f"{today_str}:{int(today_min)}:{int(yest)}"
+            rid = str(a['route_id'])
+            if route_states.get(rid, {}).get('last_anomaly_signature') == signature:
+                continue
             route = routes.get(a['route_id'], {})
             name = route.get('name', a.get('route_name', f"#{a['route_id']}"))
             alerts.append({
@@ -248,13 +359,15 @@ def collect_anomaly_alerts(conn, analyses, routes, today_str):
                 'yest': yest,
                 'today': today_min,
                 'pct': pct,
+                'signature': signature,
             })
     return alerts
 
 
-def collect_failure_alerts(state, routes):
+def collect_failure_alerts(state, routes, notified_state):
     """連續失敗 ≥ FAILURE_THRESHOLD 次的路線"""
     alerts = []
+    route_states = notified_state.setdefault('routes', {})
     for rid_str, info in (state.get('routes') or {}).items():
         failures = info.get('consecutive_failures', 0)
         if failures < FAILURE_THRESHOLD:
@@ -268,6 +381,11 @@ def collect_failure_alerts(state, routes):
             continue
         if route.get('active') is False:
             continue
+        last_alert_count = route_states.get(rid_str, {}).get('last_failure_alert_count', 0)
+        if failures == last_alert_count:
+            continue
+        if failures != FAILURE_THRESHOLD and failures % FAILURE_THRESHOLD != 0:
+            continue
         alerts.append({
             'id': rid,
             'name': route.get('name', f"#{rid}"),
@@ -275,6 +393,27 @@ def collect_failure_alerts(state, routes):
             'last_success_ts': info.get('last_success_ts'),
         })
     return alerts
+
+
+def update_notified_state(notified_state, price_events, anomalies, failures):
+    now = datetime.utcnow().isoformat()
+    routes = notified_state.setdefault('routes', {})
+    for ev in price_events:
+        info = routes.setdefault(str(ev['id']), {})
+        info['last_notified_at'] = now
+        info['last_min_price_twd'] = int(ev['today_min'])
+        info['last_status'] = ev.get('status')
+        info['last_signature'] = ev.get('signature')
+        info['last_reason'] = ev.get('reason')
+    for al in anomalies:
+        info = routes.setdefault(str(al['id']), {})
+        info['last_anomaly_at'] = now
+        info['last_anomaly_signature'] = al.get('signature')
+    for fa in failures:
+        info = routes.setdefault(str(fa['id']), {})
+        info['last_failure_alert_at'] = now
+        info['last_failure_alert_count'] = fa.get('failures', 0)
+    notified_state['updated_at_utc'] = now
 
 
 def build_route_block(conn, a, route, today_str, verbose):
@@ -343,7 +482,7 @@ def build_route_block(conn, a, route, today_str, verbose):
     return lines
 
 
-def build_full_message(conn, analyses, routes, notify_ids, anomalies, failures):
+def build_full_message(conn, analyses, routes, price_events, anomalies, failures):
     today = date.today()
     today_str = today.isoformat()
     now_str = datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y-%m-%d %H:%M')
@@ -351,11 +490,12 @@ def build_full_message(conn, analyses, routes, notify_ids, anomalies, failures):
 
     active = [a for a in analyses if routes.get(a['route_id'])]
     no_data_n = sum(1 for a in active if a.get('today_min') is None)
+    event_ids = {ev['id'] for ev in price_events}
 
     if anomalies:
         conclusion = f"有 {len(anomalies)} 條出現明顯降價，建議先檢查。"
-    elif notify_ids:
-        conclusion = f"有 {len(notify_ids)} 條達通知門檻。"
+    elif price_events:
+        conclusion = f"有 {len(price_events)} 條值得注意。"
     elif failures:
         conclusion = f"有 {len(failures)} 條連續抓不到資料，需要檢查設定。"
     elif no_data_n:
@@ -381,6 +521,14 @@ def build_full_message(conn, analyses, routes, notify_ids, anomalies, failures):
             )
         lines.append("")
 
+    if price_events:
+        lines.append("值得注意")
+        for ev in price_events:
+            lines.append(
+                f"#{ev['id']} {ev['name']}：{money(ev['today_min'])}｜{STATUS_LABEL.get(ev['status'], ev['status'])}｜{ev['reason']}"
+            )
+        lines.append("")
+
     # 連續失敗警報
     if failures:
         lines.append("需要檢查的路線")
@@ -392,13 +540,130 @@ def build_full_message(conn, analyses, routes, notify_ids, anomalies, failures):
     for a in active:
         route = routes[a['route_id']]
         # 異常下殺的路線一律展開細節，方便看
-        verbose = a['route_id'] in notify_ids or any(al['id'] == a['route_id'] for al in anomalies)
+        verbose = a['route_id'] in event_ids or any(al['id'] == a['route_id'] for al in anomalies)
         lines.extend(build_route_block(conn, a, route, today_str, verbose=verbose))
         lines.append("")
 
     lines.append("說明：Google Flights 開啟後仍會重新查價，實際票價與可訂位狀態以頁面顯示為準。")
 
     return "\n".join(lines).strip()
+
+
+def next_scheduled_scan_taipei():
+    now = datetime.now(ZoneInfo('Asia/Taipei'))
+    for add_days in (0, 1):
+        base = now + timedelta(days=add_days)
+        for hour in (9, 21):
+            candidate = base.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if candidate > now:
+                return candidate.strftime('%Y-%m-%d %H:%M 台北時間')
+    return ''
+
+
+def build_status_payload(conn, analyses, routes, price_events, anomalies, failures, scrape_state):
+    today_str = date.today().isoformat()
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+    now_tpe = datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y-%m-%d %H:%M')
+    analysis_by_id = {a['route_id']: a for a in analyses}
+    price_event_by_id = {ev['id']: ev for ev in price_events}
+    anomaly_by_id = {al['id']: al for al in anomalies}
+    failure_by_id = {fa['id']: fa for fa in failures}
+    total_today = get_total_today(conn, today_str)
+
+    route_items = []
+    for rid in sorted(routes):
+        route = routes[rid]
+        a = analysis_by_id.get(rid)
+        state = (scrape_state.get('routes') or {}).get(str(rid), {})
+        trad_n, lcc_n = get_today_counts(conn, rid, today_str)
+        status = None
+        reason = ''
+        today_min = None
+        history_counts = {}
+        best = None
+        if a:
+            today_min = a.get('today_min')
+            status, reason = analysis_status(a)
+            history_counts = {
+                '30': a.get('history_count_30', 0),
+                '90': a.get('history_count_90', 0),
+                '365': a.get('history_count_365', 0),
+            }
+            if today_min is not None:
+                best = best_flight_dict(get_best_traditional_flight(conn, rid, today_str), route)
+        route_items.append({
+            'id': rid,
+            'name': route.get('name', f"#{rid}"),
+            'active': route.get('active', True),
+            'origin': route.get('origin'),
+            'destinations': route.get('destinations') or [],
+            'cabin_classes': route.get('cabin_classes') or [],
+            'depart_date_range': route.get('depart_date_range') or {},
+            'trip_duration_days': route.get('trip_duration_days'),
+            'notify_threshold': route.get('notify_threshold', 'cheap'),
+            'today_min': today_min,
+            'status': status,
+            'status_label': STATUS_LABEL.get(status, status) if status else None,
+            'reason': reason,
+            'traditional_count': trad_n,
+            'lcc_count': lcc_n,
+            'history_counts': history_counts,
+            'best_flight': best,
+            'last_scan_ts': state.get('last_scan_ts'),
+            'last_success_ts': state.get('last_success_ts'),
+            'last_written': state.get('last_written', 0),
+            'consecutive_failures': state.get('consecutive_failures', 0),
+            'google_flights_url': google_flights_url(route),
+            'price_event': price_event_by_id.get(rid),
+            'anomaly': anomaly_by_id.get(rid),
+            'failure': failure_by_id.get(rid),
+        })
+
+    active_routes = [r for r in route_items if r['active']]
+    no_data_n = sum(1 for r in active_routes if r['today_min'] is None)
+    if anomalies:
+        conclusion = f"有 {len(anomalies)} 條明顯降價。"
+    elif price_events:
+        conclusion = f"有 {len(price_events)} 條值得注意。"
+    elif failures:
+        conclusion = f"有 {len(failures)} 條需要檢查。"
+    elif no_data_n:
+        conclusion = f"有 {no_data_n} 條今天沒有傳統航空資料。"
+    else:
+        conclusion = "系統正常，暫無新提醒。"
+
+    return {
+        'generated_at_utc': now_utc,
+        'generated_at_taipei': f"{now_tpe} 台北時間",
+        'scan_date': today_str,
+        'next_scheduled_scan_taipei': next_scheduled_scan_taipei(),
+        'total_routes': len(route_items),
+        'active_routes': len(active_routes),
+        'scanned_routes': len(analyses),
+        'total_written_today': total_today,
+        'conclusion': conclusion,
+        'routes': route_items,
+        'price_events': price_events,
+        'anomalies': anomalies,
+        'failures': failures,
+    }
+
+
+def save_and_publish_status(payload):
+    save_json(STATUS_JSON, payload)
+    if not STATUS_WEBHOOK_URL:
+        return
+    try:
+        resp = requests.post(
+            STATUS_WEBHOOK_URL,
+            json=payload,
+            headers={'Authorization': f"Bearer {TOKEN}"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        log.info("狀態已同步到 Worker KV")
+    except Exception as e:
+        log.warning(f"狀態同步 Worker KV 失敗：{e}")
 
 
 # ─────────── Telegram ───────────
@@ -408,13 +673,16 @@ def send_telegram(text, buttons=None):
     payload = {'text': text}
     if buttons:
         payload['reply_markup'] = {'inline_keyboard': buttons}
+    sent = 0
     for chat_id in CHAT_IDS:
         try:
             resp = requests.post(url, json={'chat_id': chat_id, **payload}, timeout=20)
             resp.raise_for_status()
             log.info(f"Telegram 訊息已送出 → {chat_id}")
+            sent += 1
         except Exception as e:
             log.error(f"Telegram 送出失敗 → {chat_id}: {e}")
+    return sent
 
 
 # ─────────── main ───────────
@@ -429,24 +697,31 @@ def main():
     conn = sqlite3.connect(DB_PATH)
 
     today_str = date.today().isoformat()
-    notify_ids = collect_notify_ids(analyses, routes)
-    anomalies = collect_anomaly_alerts(conn, analyses, routes, today_str)
+    notified_state = load_json(NOTIFIED_STATE_JSON, {'routes': {}})
+    price_events = collect_price_events(conn, analyses, routes, today_str, notified_state)
+    anomalies = collect_anomaly_alerts(conn, analyses, routes, today_str, notified_state)
     state = load_scrape_state()
-    failures = collect_failure_alerts(state, routes)
+    failures = collect_failure_alerts(state, routes, notified_state)
     send_heartbeat = os.environ.get('SEND_HEARTBEAT') == '1'
 
-    # 異常下殺一律送，無視 threshold
-    must_send = bool(notify_ids or anomalies or failures or send_heartbeat)
+    status_payload = build_status_payload(conn, analyses, routes, price_events, anomalies, failures, state)
+    save_and_publish_status(status_payload)
+
+    # 明顯降價、值得注意、連續失敗一律送；其他依心跳設定送摘要。
+    must_send = bool(price_events or anomalies or failures or send_heartbeat)
     if not must_send:
-        log.info("無達門檻、無異常、無失敗、未啟用心跳，不送訊息")
+        log.info("無新提醒、無異常、無失敗、未啟用心跳，不送訊息")
         conn.close()
         return
 
-    msg = build_full_message(conn, analyses, routes, notify_ids, anomalies, failures)
+    msg = build_full_message(conn, analyses, routes, price_events, anomalies, failures)
     buttons = build_link_buttons(conn, analyses, routes, today_str)
     conn.close()
     if msg:
-        send_telegram(msg, buttons=buttons)
+        sent = send_telegram(msg, buttons=buttons)
+        if sent:
+            update_notified_state(notified_state, price_events, anomalies, failures)
+            save_json(NOTIFIED_STATE_JSON, notified_state)
 
 
 if __name__ == '__main__':

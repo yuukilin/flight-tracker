@@ -9,3 +9,7 @@ node_modules/
 # 資料檔不放 main，改由 Actions cache 管理（避免 Actions 自動 commit 跟本地 push 衝突）
 data/prices.db
 data/analysis.json
+data/scrape_state.json
+data/notified_state.json
+data/status.json
+data/last_fx.json

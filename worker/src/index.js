@@ -2,7 +2,7 @@
 // 接 Telegram webhook → 處理指令 → 改 GitHub routes.json / 觸發 workflow → 回訊息
 // 支援：按鈕引導 /add、城市名→機場、欄位驗證、多 chat_id、summary 確認、美化 /show
 
-const HELP_TEXT = `🤖 機票追蹤 Bot
+const HELP_TEXT = `機票追蹤 Bot
 
 【路線管理】
 /list                       列出所有追蹤航線
@@ -248,9 +248,9 @@ function removeKbOpts() {
 
 function mainMenuOpts() {
   return kbOpts([
-    ['➕ 新增路線', '📋 我的路線'],
-    ['🔍 立即掃描', '❓ 說明'],
-    ['🏆 歷史最低', '📈 價格走勢'],
+    ['新增路線', '我的路線'],
+    ['立即掃描', '說明'],
+    ['歷史最低', '價格走勢'],
   ], false);
 }
 
@@ -320,6 +320,121 @@ async function loadRoutes(env) {
 
 async function saveRoutes(env, data, sha, message) {
   await writeFile(env, 'routes.json', JSON.stringify(data, null, 2), sha, message);
+}
+
+// ─── 掃描狀態 KV ───
+async function saveLatestStatus(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  if (auth !== `Bearer ${env.TELEGRAM_BOT_TOKEN}`) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return new Response('Bad JSON', { status: 400 });
+  }
+  if (!payload || typeof payload !== 'object' || !payload.generated_at_utc) {
+    return new Response('Invalid status payload', { status: 400 });
+  }
+  await env.STATE.put('status:latest', JSON.stringify(payload), { expirationTtl: 60 * 60 * 24 * 45 });
+  return new Response('OK');
+}
+
+async function loadLatestStatus(env) {
+  try {
+    return await env.STATE.get('status:latest', 'json');
+  } catch {
+    return null;
+  }
+}
+
+function moneyText(n) {
+  if (n === null || n === undefined) return '無資料';
+  return `NT$ ${Number(n).toLocaleString('en-US')}`;
+}
+
+function cabinText(cabins) {
+  return (cabins || []).map((c) => CABIN_VAL_TO_LABEL[c] || c).join('/') || '未設定';
+}
+
+function isPastRoute(route) {
+  const end = route?.depart_date_range?.end;
+  if (!end) return false;
+  return dateKey(end) < dateKey(taipeiTodayIso());
+}
+
+function statusIsStale(status) {
+  if (!status?.generated_at_utc) return true;
+  const t = Date.parse(status.generated_at_utc);
+  if (!Number.isFinite(t)) return true;
+  return Date.now() - t > 36 * 60 * 60 * 1000;
+}
+
+function routeStatusById(status) {
+  const out = new Map();
+  for (const item of status?.routes || []) out.set(Number(item.id), item);
+  return out;
+}
+
+function buildMenuStatusText(routes, status) {
+  const activeRoutes = routes.filter((r) => r.active !== false);
+  const pausedRoutes = routes.length - activeRoutes.length;
+  const expiredRoutes = activeRoutes.filter(isPastRoute);
+  const lines = [
+    '機票追蹤總覽',
+    '',
+    `追蹤路線：${activeRoutes.length} 條啟用${pausedRoutes ? `，${pausedRoutes} 條暫停` : ''}`,
+  ];
+
+  if (!status) {
+    lines.push('上次掃描：尚無狀態資料');
+    lines.push('建議：先按「立即掃描」，掃完後這裡會顯示最低價與資料狀態。');
+    return lines.join('\n');
+  }
+
+  const stale = statusIsStale(status);
+  lines.push(`上次掃描：${status.generated_at_taipei || status.generated_at_utc}`);
+  if (stale) lines.push('提醒：這份狀態超過 36 小時，可能已經不是最新結果。');
+  lines.push(`本次寫入：${status.total_written_today ?? 0} 筆票價`);
+  if (status.next_scheduled_scan_taipei) {
+    lines.push(`下次排程：${status.next_scheduled_scan_taipei}`);
+  }
+  lines.push(`結論：${status.conclusion || '暫無結論'}`);
+  if (expiredRoutes.length > 0) {
+    lines.push(`過期路線：${expiredRoutes.length} 條，建議暫停或複製後改日期。`);
+  }
+  lines.push('');
+
+  const byId = routeStatusById(status);
+  if (activeRoutes.length === 0) {
+    lines.push('目前沒有啟用中的路線。');
+    return lines.join('\n');
+  }
+
+  lines.push('各路線');
+  for (const route of activeRoutes.slice(0, 6)) {
+    const item = byId.get(Number(route.id));
+    const fallbackRoute = `${route.origin || '?'} → ${(route.destinations || []).join('/') || '?'}`;
+    lines.push(`#${route.id} ${route.name}`);
+    if (!item) {
+      lines.push(`  ${fallbackRoute}｜尚無掃描資料`);
+      continue;
+    }
+    const price = item.today_min === null || item.today_min === undefined
+      ? '沒有傳統航空票價'
+      : `最低 ${moneyText(item.today_min)}`;
+    const statusLabel = item.status_label || '未判斷';
+    lines.push(`  ${fallbackRoute}｜${cabinText(route.cabin_classes)}｜${price}｜${statusLabel}`);
+    lines.push(`  資料：傳統航空 ${item.traditional_count || 0} 筆，廉航 ${item.lcc_count || 0} 筆`);
+    if (item.consecutive_failures) {
+      lines.push(`  注意：已連續 ${item.consecutive_failures} 次無資料`);
+    }
+  }
+  if (activeRoutes.length > 6) lines.push(`另有 ${activeRoutes.length - 6} 條路線未列出，輸入 /list 查看。`);
+  lines.push('');
+  lines.push('可點下方按鈕操作；要看查票連結請進 /list 或單一路線面板。');
+  return lines.join('\n');
 }
 
 // ─── 驗證 ───
@@ -425,6 +540,10 @@ function presetDateRange(text) {
   if (t.includes('櫻花')) {
     const y = today.month > 4 ? today.year + 1 : today.year;
     return { start: `${y}-03-15`, end: `${y}-04-15`, label: `${y} 櫻花季` };
+  }
+  if (t.includes('滑雪') || t.includes('雪季')) {
+    const y = today.month > 2 ? today.year : today.year - 1;
+    return { start: `${y}-12-01`, end: `${y + 1}-02-${daysInMonth(y + 1, 2)}`, label: `${y}-${y + 1} 滑雪季` };
   }
   if (t.includes('跨年')) {
     const y = today.month === 12 && today.day > 20 ? today.year + 1 : today.year;
@@ -633,7 +752,8 @@ const ADD_STEPS = [
     keyboard: [
       ['未來 3 個月', '未來半年'],
       ['暑假', '寒假'],
-      ['賞楓', '跨年'],
+      ['賞楓', '滑雪'],
+      ['跨年'],
     ],
     parse: (v) => parseFlexibleDateRange(v),
     validate: (v) => {
@@ -696,7 +816,7 @@ const ADD_STEPS = [
   },
 ];
 
-const ADD_CONFIRM_KEYBOARD = [['✅ 確認新增', '✏️ 修改'], ['❌ 取消']];
+const ADD_CONFIRM_KEYBOARD = [['確認新增', '修改'], ['取消']];
 
 const ADD_DRAFT_EDIT_CHOICES = [
   { label: '改目的地', key: 'destinations' },
@@ -1002,7 +1122,7 @@ function addConfirmOpts() {
 
 function addDraftEditOpts() {
   const rows = ADD_DRAFT_EDIT_CHOICES.map((choice) => [choice.label]);
-  rows.push(['✅ 回到確認'], ['❌ 取消']);
+  rows.push(['回到確認'], ['取消']);
   return kbOpts(rows);
 }
 
@@ -1128,7 +1248,7 @@ function formatRouteSummary(r) {
   const dests = (r.destinations || []).join(', ');
   const dep = r.depart_time_window || '不限';
   const ret = r.return_time_window || '不限';
-  const status = r.active === false ? '⏸️ 暫停' : '🟢 啟用';
+  const status = r.active === false ? '暫停' : '啟用';
   const weekendCount = r.must_contain_full_weekends ?? '?';
   return [
     `${status} #${r.id ?? '?'} ${r.name}`,
@@ -1156,6 +1276,12 @@ function isAuthorized(env, chatId) {
 // ─── 主入口 ───
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === '/internal/status') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      return saveLatestStatus(request, env);
+    }
+
     if (request.method !== 'POST') return new Response('OK');
     let update;
     try {
@@ -1174,7 +1300,7 @@ export default {
     const chatId = String(msg.chat.id);
 
     if (!isAuthorized(env, chatId)) {
-      await sendMsg(env, chatId, '❌ 無權限');
+      await sendMsg(env, chatId, '無權限');
       return new Response('OK');
     }
 
@@ -1189,7 +1315,7 @@ export default {
         await handleMenuText(env, chatId, text);
       }
     } catch (e) {
-      await sendMsg(env, chatId, `❌ 錯誤：${e.message}`, removeKbOpts());
+      await sendMsg(env, chatId, `錯誤：${e.message}`, removeKbOpts());
     }
     return new Response('OK');
   },
@@ -1258,7 +1384,7 @@ async function cmdThreshold(env, chatId, id, level) {
   const old = r.notify_threshold;
   r.notify_threshold = lvl;
   await saveRoutes(env, data, sha, `Set threshold #${id} ${old}→${lvl}`);
-  await sendMsg(env, chatId, `✅ #${id} 通知門檻：${old} → ${lvl}`, removeKbOpts());
+  await sendMsg(env, chatId, `#${id} 通知門檻已更新：${old} → ${lvl}`, removeKbOpts());
 }
 
 // ─── /clone ───
@@ -1281,7 +1407,7 @@ async function cmdClone(env, chatId, id) {
   await sendMsg(
     env,
     chatId,
-    `✅ 已複製 #${id} → #${newId}：${cloned.name}\n用 /edit ${newId} <field> <value> 修改欄位`,
+    `已複製 #${id} → #${newId}：${cloned.name}\n用 /edit ${newId} <field> <value> 修改欄位`,
     removeKbOpts()
   );
 }
@@ -1441,11 +1567,12 @@ const EDIT_ROUTE_FIELDS = [
 10/1-12/31
 10月到12月
 明年10月到12月
-賞楓 / 寒假 / 暑假 / 跨年`,
+賞楓 / 滑雪 / 寒假 / 暑假 / 跨年`,
     keyboard: [
       ['未來 3 個月', '未來半年'],
       ['暑假', '寒假'],
-      ['賞楓', '跨年'],
+      ['賞楓', '滑雪'],
+      ['跨年'],
     ],
   },
   {
@@ -1543,10 +1670,10 @@ async function cmdEdit(env, chatId, id, field, value) {
   try {
     applyRouteEditValue(r, field, value);
   } catch (e) {
-    return sendMsg(env, chatId, `❌ ${e.message}`);
+    return sendMsg(env, chatId, e.message);
   }
   await saveRoutes(env, data, sha, `Edit route #${id} ${field}`);
-  await sendMsg(env, chatId, `✅ #${id} ${field} 已更新\n\n${formatRouteSummary(r)}`, removeKbOpts());
+  await sendMsg(env, chatId, `#${id} ${field} 已更新\n\n${formatRouteSummary(r)}`, removeKbOpts());
 }
 
 // ─── /history /best /chart 觸發 query.yml ───
@@ -1562,21 +1689,18 @@ async function cmdQuery(env, chatId, action, id, days) {
     days: String(days),
   });
   const note = action === 'best'
-    ? `✅ 已觸發歷史最低查詢 #${id}，約 1-2 分鐘後回傳`
+    ? `已觸發歷史最低查詢 #${id}，約 1-2 分鐘後回傳`
     : action === 'debug'
-      ? `✅ 已觸發抓取診斷 #${id}，約 1-2 分鐘後回傳`
-      : `✅ 已觸發 ${action} 查詢 #${id}（${days} 天），約 1-2 分鐘後回傳`;
+      ? `已觸發抓取診斷 #${id}，約 1-2 分鐘後回傳`
+      : `已觸發 ${action} 查詢 #${id}（${days} 天），約 1-2 分鐘後回傳`;
   await sendMsg(env, chatId, note, removeKbOpts());
 }
 
 async function cmdMenu(env, chatId) {
   await setupTelegramMenu(env).catch(() => {});
-  return sendMsg(
-    env,
-    chatId,
-    '你想做什麼？\n\n常用功能都在下面，直接點就好。',
-    mainMenuOpts()
-  );
+  const { data } = await loadRoutes(env);
+  const status = await loadLatestStatus(env);
+  return sendMsg(env, chatId, buildMenuStatusText(data.routes, status), mainMenuOpts());
 }
 
 async function handleMenuText(env, chatId, text) {
@@ -1660,7 +1784,7 @@ function routeEditButtons(route) {
 async function sendRoutePicker(env, chatId, action) {
   const { data } = await loadRoutes(env);
   if (data.routes.length === 0) {
-    return sendMsg(env, chatId, '目前沒有路線。先點「➕ 新增路線」。', mainMenuOpts());
+    return sendMsg(env, chatId, '目前沒有路線。先點「新增路線」。', mainMenuOpts());
   }
   const title = {
     show: '要看哪一條路線？',
@@ -1788,7 +1912,7 @@ async function handleCallback(env, cb) {
     const { data: routesData } = await loadRoutes(env);
     const route = routesData.routes.find((x) => x.id === id);
     if (!route) return sendMsg(env, chatId, `找不到 #${id}`);
-    const text = `📍 路線詳細\n\n${formatRouteSummary(route)}`;
+    const text = `路線詳細\n\n${formatRouteSummary(route)}`;
     if (messageId) {
       const edited = await editMsg(env, chatId, messageId, text, routeButtons(route));
       if (edited?.ok) return;
@@ -1801,14 +1925,14 @@ async function handleCallback(env, cb) {
 async function cmdList(env, chatId) {
   const { data } = await loadRoutes(env);
   if (data.routes.length === 0) {
-    return sendMsg(env, chatId, '尚無追蹤航線。點「➕ 新增路線」開始。', mainMenuOpts());
+    return sendMsg(env, chatId, '尚無追蹤航線。點「新增路線」開始。', mainMenuOpts());
   }
-  const lines = ['📋 追蹤中的航線：', ''];
+  const lines = ['追蹤中的航線', ''];
   for (const r of data.routes) {
-    const status = r.active === false ? '⏸️' : '🟢';
+    const status = r.active === false ? '暫停' : '啟用';
     const cabins = (r.cabin_classes || []).join(',');
     const dests = (r.destinations || []).join('/');
-    lines.push(`${status} #${r.id} ${r.name}`);
+    lines.push(`${status}｜#${r.id} ${r.name}`);
     lines.push(`   ${r.origin}→${dests}（${cabins}）`);
     lines.push(`   ${r.depart_date_range?.start}~${r.depart_date_range?.end} 共 ${r.trip_duration_days} 天`);
     lines.push(`   通知門檻：${r.notify_threshold}`);
@@ -1827,7 +1951,7 @@ async function cmdShow(env, chatId, id) {
   const { data } = await loadRoutes(env);
   const r = data.routes.find((x) => x.id === id);
   if (!r) return sendMsg(env, chatId, `找不到 #${id}`);
-  const text = `📍 路線詳細\n\n${formatRouteSummary(r)}`;
+  const text = `路線詳細\n\n${formatRouteSummary(r)}`;
   await sendMsg(env, chatId, text, routeButtons(r));
 }
 
@@ -1838,7 +1962,7 @@ async function cmdRemove(env, chatId, id) {
   if (idx < 0) return sendMsg(env, chatId, `找不到 #${id}`);
   const removed = data.routes.splice(idx, 1)[0];
   await saveRoutes(env, data, sha, `Remove route #${id} via bot`);
-  await sendMsg(env, chatId, `✅ 已刪除 #${id}：${removed.name}`, removeKbOpts());
+  await sendMsg(env, chatId, `已刪除 #${id}：${removed.name}`, removeKbOpts());
 }
 
 async function cmdToggleActive(env, chatId, id, active) {
@@ -1848,12 +1972,12 @@ async function cmdToggleActive(env, chatId, id, active) {
   if (!r) return sendMsg(env, chatId, `找不到 #${id}`);
   r.active = active;
   await saveRoutes(env, data, sha, `${active ? 'Resume' : 'Pause'} route #${id}`);
-  await sendMsg(env, chatId, `✅ #${id} ${active ? '已恢復' : '已暫停'}`, removeKbOpts());
+  await sendMsg(env, chatId, `#${id} ${active ? '已恢復' : '已暫停'}`, removeKbOpts());
 }
 
 async function cmdScan(env, chatId) {
   await triggerWorkflow(env, 'scrape.yml');
-  await sendMsg(env, chatId, '✅ 已觸發排程，約 1-3 分鐘後通知', removeKbOpts());
+  await sendMsg(env, chatId, '已觸發排程，約 1-3 分鐘後通知', removeKbOpts());
 }
 
 // ─── /add 多輪 ───
@@ -1956,7 +2080,7 @@ async function handleAddFlow(env, chatId, text, state) {
     return sendMsg(
       env,
       chatId,
-      `❌ ${e.message}\n請重新輸入：`,
+      `${e.message}\n請重新輸入：`,
       step.keyboard ? kbOpts(step.keyboard) : removeKbOpts()
     );
   }
@@ -1969,7 +2093,7 @@ async function handleAddFlow(env, chatId, text, state) {
   if (nextStep < 0) {
     state.flow = 'add_confirm';
     await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
-    await sendAddConfirmPreview(env, chatId, state, `${parsed.extraNote}📋 請確認新增：`);
+    await sendAddConfirmPreview(env, chatId, state, `${parsed.extraNote}請確認新增：`);
     return;
   }
 
@@ -1992,7 +2116,7 @@ async function handleAddConfirm(env, chatId, text, state) {
     return sendMsg(
       env,
       chatId,
-      '請點「✅ 確認新增」、「✏️ 修改」或「❌ 取消」',
+      '請點「確認新增」、「修改」或「取消」',
       addConfirmOpts()
     );
   }
@@ -2006,7 +2130,7 @@ async function handleAddConfirm(env, chatId, text, state) {
   await sendMsg(
     env,
     chatId,
-    `✅ 已新增 #${newId}：${route.name}\n下次排程會自動追蹤，或輸入 /scan 立即抓`,
+    `已新增 #${newId}：${route.name}\n下次排程會自動追蹤，或輸入 /scan 立即抓`,
     removeKbOpts()
   );
 }
@@ -2019,12 +2143,12 @@ async function handleAddDraftEdit(env, chatId, text, state) {
   if (/確認|回到確認|✅/i.test(text)) {
     state.flow = 'add_confirm';
     await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
-    return sendAddConfirmPreview(env, chatId, state, '📋 請確認新增：');
+    return sendAddConfirmPreview(env, chatId, state, '請確認新增：');
   }
   const compact = compactUserText(text);
   const choice = ADD_DRAFT_EDIT_CHOICES.find((item) => compact.includes(item.label.replace(/^改/, '')));
   if (!choice) {
-    return sendMsg(env, chatId, '請選一個要修改的項目，或點「✅ 回到確認」。', addDraftEditOpts());
+    return sendMsg(env, chatId, '請選一個要修改的項目，或點「回到確認」。', addDraftEditOpts());
   }
   state.flow = 'add_draft_field';
   state.editKey = choice.key;
@@ -2052,7 +2176,7 @@ async function handleAddDraftField(env, chatId, text, state) {
     return sendMsg(
       env,
       chatId,
-      `❌ ${e.message}\n請重新輸入：`,
+      `${e.message}\n請重新輸入：`,
       step.keyboard ? kbOpts(step.keyboard) : removeKbOpts()
     );
   }
@@ -2062,7 +2186,7 @@ async function handleAddDraftField(env, chatId, text, state) {
   delete state.editKey;
   state.flow = 'add_confirm';
   await env.STATE.put(`dlg:${chatId}`, JSON.stringify(state), { expirationTtl: 1800 });
-  return sendAddConfirmPreview(env, chatId, state, `${parsed.extraNote}📋 已更新，請再確認：`);
+  return sendAddConfirmPreview(env, chatId, state, `${parsed.extraNote}已更新，請再確認：`);
 }
 
 async function handleRouteEditField(env, chatId, text, state) {
@@ -2093,13 +2217,13 @@ async function handleRouteEditField(env, chatId, text, state) {
     return sendMsg(
       env,
       chatId,
-      `❌ ${e.message}\n請重新輸入「${choice.label.replace(/^改/, '')}」：`,
+      `${e.message}\n請重新輸入「${choice.label.replace(/^改/, '')}」：`,
       routeEditFieldOpts(choice)
     );
   }
 
   await saveRoutes(env, data, sha, `Edit route #${id} ${state.field} via bot buttons`);
   await env.STATE.delete(`dlg:${chatId}`);
-  await sendMsg(env, chatId, `✅ #${id} ${choice.label.replace(/^改/, '')}已更新`, removeKbOpts());
-  return sendMsg(env, chatId, `📍 路線詳細\n\n${formatRouteSummary(route)}`, routeButtons(route));
+  await sendMsg(env, chatId, `#${id} ${choice.label.replace(/^改/, '')}已更新`, removeKbOpts());
+  return sendMsg(env, chatId, `路線詳細\n\n${formatRouteSummary(route)}`, routeButtons(route));
 }

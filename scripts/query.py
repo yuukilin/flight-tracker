@@ -103,6 +103,12 @@ def google_flights_url(route, depart_date=None, return_date=None, destination=No
     return "https://www.google.com/travel/flights?q=" + quote_plus(query)
 
 
+def airline_search_url(airline_name):
+    if not airline_name:
+        return None
+    return "https://www.google.com/search?q=" + quote_plus(f"{airline_name} official site booking")
+
+
 def send_text(chat_id, text, buttons=None):
     if not TOKEN:
         print(f"[no token] would send: {text}")
@@ -290,7 +296,11 @@ def action_best(rid, chat_id, limit=5):
     for i, (p, an, dd, rd, dest, stops) in enumerate(best_rows, 1):
         s = "直飛" if stops == 0 else f"轉機 {stops} 次"
         lines.append(f"{i}. NT$ {p:,}｜{an}｜{dd} 去，{rd} 回｜{dest}｜{s}")
-        buttons.append([{'text': f"第 {i} 筆開 Google Flights", 'url': google_flights_url(route, dd, rd, dest)}])
+        row = [{'text': f"第 {i} 筆 Google Flights", 'url': google_flights_url(route, dd, rd, dest)}]
+        airline_url = airline_search_url(an)
+        if airline_url:
+            row.append({'text': '搜尋航空公司官網', 'url': airline_url})
+        buttons.append(row)
     lines.append("")
     lines.append("說明：Google Flights 開啟後會重新查價，實際票價與可訂位狀態以頁面顯示為準。")
     send_text(chat_id, '\n'.join(lines), buttons=buttons)
