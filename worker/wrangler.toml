@@ -1,6 +1,7 @@
 name = "flight-bot"
 main = "src/index.js"
 compatibility_date = "2026-05-26"
+account_id = "0bc47d0496e6cc443cdf1f918a8f43d9"
 
 [[kv_namespaces]]
 binding = "STATE"
