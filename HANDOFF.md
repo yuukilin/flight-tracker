@@ -25,7 +25,8 @@
 - 通知已加入去重：同一價格、同一狀態不會一直被當成新提醒。
 - Telegram 輸出已改成「閱讀優先級 → 重點 → 路線細節」，第一眼可判斷今天需不需要讀。
 - `data/prices.db` 與 `data/analysis.json` 已從 git 追蹤移除，只靠 Actions cache / artifact 保存。
-- 本輪完成後需 push 到 GitHub 並重新部署 Worker，讓 `/menu` 狀態面板與 `/internal/status` 上線。
+- 最新程式已 push 到 GitHub，Worker 已重新部署上線。
+- 任何功能、部署、排查、測試或狀態進度有更新，都要同步回寫 `CLAUDE.md` 和 `HANDOFF.md`。
 
 現在 Telegram bot 已支援：
 - `/menu` 主選單

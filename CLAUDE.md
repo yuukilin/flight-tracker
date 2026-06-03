@@ -24,6 +24,7 @@
 - Telegram 輸出已改成「閱讀優先級 → 重點 → 路線細節」：第一行會顯示必看、值得看、檢查一下或可略過。
 - `data/prices.db`、`data/analysis.json` 已改成只由 Actions cache / artifact 管理，不再放進 git 追蹤。
 - 目前購票入口以 Google Flights 精準查詢為主；航空公司按鈕使用「官網搜尋」入口，避免硬寫可能過期的結帳網址。
+- 任何功能、部署、排查、測試或狀態進度有更新，都要同步回寫 `CLAUDE.md` 和 `HANDOFF.md`。
 
 ---
 
@@ -261,9 +262,10 @@ wrangler secret list
 1. **先讀這份 CLAUDE.md 全文**，再做任何事
 2. 確認 user 連的資料夾就是 `/Users/yuukilin/Desktop/python/flight-tracker/`
 3. 修改任何檔案前看一下 `git log --oneline -10` 了解最近改了什麼
-4. push 衝突的處理已經在「資料持久化」設計裡解決，user 本地 push 應該永遠不衝突
-5. 任何 LCC 漏網（傳統航空欄出現廉航名稱）→ 補 `excluded_airlines.yaml` 的 `name_keywords`
-6. Bot 沒回應 → 第一個檢查 Cloudflare Worker logs；第二個檢查 webhook 狀態
-7. Actions 失敗 → 看 log 的最後一個紅 X 步驟，貼錯誤訊息給 user
+4. 任何功能、部署、排查、測試或狀態進度有更新，完成前都要同步更新 `CLAUDE.md` 和 `HANDOFF.md`
+5. push 衝突的處理已經在「資料持久化」設計裡解決，user 本地 push 應該永遠不衝突
+6. 任何 LCC 漏網（傳統航空欄出現廉航名稱）→ 補 `excluded_airlines.yaml` 的 `name_keywords`
+7. Bot 沒回應 → 第一個檢查 Cloudflare Worker logs；第二個檢查 webhook 狀態
+8. Actions 失敗 → 看 log 的最後一個紅 X 步驟，貼錯誤訊息給 user
 
 歡迎接手，希望這份檔讓你能無痛上工 ✈️
