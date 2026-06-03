@@ -23,7 +23,31 @@
       "must_contain_full_weekends": 2,
       "notify_threshold": "cheap",
       "name": "札幌豪經 9 天"
+    },
+    {
+      "id": 4,
+      "created_at": "2026-06-03",
+      "active": true,
+      "max_price_twd": 0,
+      "depart_time_window": null,
+      "return_time_window": null,
+      "max_stops": 1,
+      "destinations": [
+        "CTS"
+      ],
+      "origin": "TPE",
+      "depart_date_range": {
+        "start": "2026-09-01",
+        "end": "2026-12-31"
+      },
+      "trip_duration_days": 9,
+      "cabin_classes": [
+        "business"
+      ],
+      "must_contain_full_weekends": 2,
+      "notify_threshold": "cheap",
+      "name": "札幌商務 9 天"
     }
   ],
-  "next_id": 4
+  "next_id": 5
 }
