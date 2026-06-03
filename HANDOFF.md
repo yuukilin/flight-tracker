@@ -23,6 +23,7 @@
 - `/menu` 已改成首頁狀態面板，會讀 Worker KV 裡的最新掃描狀態。
 - GitHub Actions 掃描後會寫 `data/status.json`、更新 `data/notified_state.json`，並把 status 同步到 Worker KV。
 - 通知已加入去重：同一價格、同一狀態不會一直被當成新提醒。
+- Telegram 輸出已改成「閱讀優先級 → 重點 → 路線細節」，第一眼可判斷今天需不需要讀。
 - `data/prices.db` 與 `data/analysis.json` 已從 git 追蹤移除，只靠 Actions cache / artifact 保存。
 - 本輪完成後需 push 到 GitHub 並重新部署 Worker，讓 `/menu` 狀態面板與 `/internal/status` 上線。
 
@@ -369,6 +370,7 @@ CLAUDE.md 第五章「未來可加」原列了 5 項，其中 4 項已在這輪 
 ### 5. 介面文字
 - `/menu`、`/list`、`/show` 與常見成功/錯誤訊息已降低圖示使用。
 - 通知維持結論優先，避免用大量 icon 混淆判讀。
+- 2026-06-03 晚間再調整：每日推播第一行顯示 `必看 / 值得看 / 檢查一下 / 可略過`，路線細節固定成「今日、重點、資料、最低票」。
 
 ---
 

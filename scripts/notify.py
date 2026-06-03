@@ -71,6 +71,14 @@ STATUS_RANK = {
     'insufficient_data': 9,
 }
 
+STATUS_BADGE = {
+    'cheap': '💰 便宜',
+    'good': '🟡 不錯',
+    'normal': '⚪ 普通',
+    'expensive': '⚪ 偏貴',
+    'insufficient_data': '🔵 資料不足',
+}
+
 CABIN_LABEL = {
     'economy': '經濟艙',
     'premium_economy': '豪華經濟艙',
@@ -180,6 +188,11 @@ def money(n):
     return f"NT$ {int(n):,}"
 
 
+def signed_money(n):
+    sign = '+' if n > 0 else '-'
+    return f"{sign}NT$ {abs(int(n)):,}"
+
+
 def cabin_label(route):
     cabins = route.get('cabin_classes') or []
     return '、'.join(CABIN_LABEL.get(c, c) for c in cabins) or '未設定'
@@ -193,6 +206,50 @@ def format_stops(stops):
 
 def format_date_pair(depart_date, return_date):
     return f"{depart_date} 去，{return_date} 回"
+
+
+def route_meta(route):
+    origin = route.get('origin', '?')
+    dest_str = '/'.join(route.get('destinations') or ['?'])
+    rng = route.get('depart_date_range') or {}
+    start = rng.get('start', '?')
+    end = rng.get('end', '?')
+    days = route.get('trip_duration_days', '?')
+    weekends = route.get('must_contain_full_weekends') or 0
+    weekend_text = f"｜跨 {weekends} 週末" if weekends else ""
+    return f"{origin} → {dest_str}｜{cabin_label(route)}｜{days} 天{weekend_text}｜{start} ~ {end}"
+
+
+def priority_profile(price_events, anomalies, failures, no_data_n):
+    if anomalies:
+        return {
+            'level': 'must_read',
+            'badge': '🔴 必看',
+            'summary': f"有 {len(anomalies)} 條明顯降價，先看這封。",
+        }
+    if price_events:
+        return {
+            'level': 'worth_reading',
+            'badge': '🟠 值得看',
+            'summary': f"有 {len(price_events)} 條達到通知條件，可以打開看。",
+        }
+    if failures:
+        return {
+            'level': 'check',
+            'badge': '🟡 檢查一下',
+            'summary': f"有 {len(failures)} 條連續抓不到資料，可能要修設定。",
+        }
+    if no_data_n:
+        return {
+            'level': 'check',
+            'badge': '🟡 檢查一下',
+            'summary': f"有 {no_data_n} 條今天沒有傳統航空資料，不是價格訊號。",
+        }
+    return {
+        'level': 'skip',
+        'badge': '🟢 可略過',
+        'summary': '沒有新便宜票，也沒有需要處理的錯誤。',
+    }
 
 
 def google_flights_url(route, depart_date=None, return_date=None, destination=None):
@@ -417,68 +474,65 @@ def update_notified_state(notified_state, price_events, anomalies, failures):
 
 
 def build_route_block(conn, a, route, today_str, verbose):
-    """單條路線一段：先講結論，再放最低票與資料狀態。"""
+    """單條路線一段：固定成「今日、重點、資料、最低票」格式。"""
     lines = []
     name = route.get('name', a.get('route_name', f"#{a['route_id']}"))
-    origin = route.get('origin', '?')
-    dest_str = '/'.join(route.get('destinations') or ['?'])
-    rng = route.get('depart_date_range') or {}
-    weekends = route.get('must_contain_full_weekends') or 0
 
+    lines.append("────────────")
     lines.append(f"#{a['route_id']} {name}")
-    lines.append(f"路線：{origin} → {dest_str}｜{cabin_label(route)}｜{route.get('trip_duration_days')} 天｜跨 {weekends} 個完整週末")
-    lines.append(f"日期：{rng.get('start', '?')} 至 {rng.get('end', '?')}")
+    lines.append(route_meta(route))
 
     trad_n, lcc_n = get_today_counts(conn, a['route_id'], today_str)
 
     today_min = a.get('today_min')
     if today_min is None:
-        lines.append("結果：今天沒有抓到傳統航空票價。")
-        lines.append(f"資料量：傳統航空 {trad_n} 筆，廉航 {lcc_n} 筆")
+        lines.append("今日：⚠️ 沒有傳統航空票價")
+        lines.append("重點：這不是便宜或偏貴，而是資料不足；若連續出現再用 /debug 檢查。")
+        lines.append(f"資料：傳統 {trad_n} 筆｜廉航 {lcc_n} 筆")
         lcc_top = get_top_flights(conn, a['route_id'], today_str, is_lcc=1, limit=2)
         if lcc_top:
             lines.append("廉航參考：")
             for i, (an, dd, rd, price, _, stops, _) in enumerate(lcc_top, 1):
-                lines.append(f"{i}. {an or '航空公司不明'}｜{format_date_pair(dd, rd)}｜{format_stops(stops)}｜{money(price)}")
-            lines.append("提醒：廉航價格通常未含行李費，先不要拿來跟傳統航空直接比較。")
+                lines.append(f"{i}. {money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{format_stops(stops)}")
+            lines.append("提醒：廉航多半未含行李費，先不要直接和傳統航空比。")
         return lines
 
-    analysis = a.get('analysis_90') or a.get('analysis_30') or ['insufficient_data', '']
-    status, reason = analysis
-    label = STATUS_LABEL.get(status, status)
-    lines.append(f"結果：有抓到票，最低 {money(today_min)}。")
-    lines.append(f"判斷：{label}。{STATUS_EXPLAIN.get(status, reason)}")
+    status, reason = analysis_status(a)
+    badge = STATUS_BADGE.get(status, STATUS_LABEL.get(status, status))
+    lines.append(f"今日：{money(today_min)}｜{badge}")
+    lines.append(f"重點：{STATUS_EXPLAIN.get(status, reason)}")
     if reason:
-        lines.append(f"原因：{reason}")
-    lines.append(f"資料量：傳統航空 {trad_n} 筆，廉航 {lcc_n} 筆")
-    lines.append(f"歷史樣本：30 天 {a['history_count_30']} 天｜90 天 {a['history_count_90']} 天｜365 天 {a['history_count_365']} 天")
+        lines.append(f"依據：{reason}")
+    lines.append(
+        f"資料：傳統 {trad_n} 筆｜廉航 {lcc_n} 筆｜歷史 {a['history_count_90']}/7 天"
+    )
 
     yest = get_yesterday_min(conn, a['route_id'], today_str)
     if yest:
         diff = today_min - yest
         pct = diff / yest * 100 if yest else 0
-        if diff < 0:
-            lines.append(f"變化：比上次低 {money(abs(diff))}（{pct:+.1f}%）。")
-        elif diff > 0:
-            lines.append(f"變化：比上次高 {money(abs(diff))}（{pct:+.1f}%）。")
+        direction = "低" if diff < 0 else "高"
+        if diff == 0:
+            lines.append("變化：和上次最低價相同")
         else:
-            lines.append("變化：和上次最低價相同。")
+            lines.append(f"變化：比上次{direction} {money(abs(diff))}（{pct:+.1f}%）")
 
     top_limit = 3 if verbose else 1
     top = get_top_flights(conn, a['route_id'], today_str, is_lcc=0, limit=top_limit)
     if top:
-        title = "最低幾組（傳統航空）：" if verbose else "今日最低組合："
+        title = "最低票：" if not verbose else "最低幾組："
         lines.append(title)
         for i, (an, dd, rd, price, _, stops, _) in enumerate(top, 1):
-            lines.append(f"{i}. {an or '航空公司不明'}｜{format_date_pair(dd, rd)}｜{format_stops(stops)}｜{money(price)}")
+            prefix = f"{i}. " if verbose else ""
+            lines.append(f"{prefix}{money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{format_stops(stops)}")
 
     lcc_top = get_top_flights(conn, a['route_id'], today_str, is_lcc=1, limit=1 if not verbose else 2)
     if lcc_top:
-        lines.append("廉航參考（未含行李費）：")
+        lines.append("廉航參考：")
         for i, (an, dd, rd, price, _, stops, _) in enumerate(lcc_top, 1):
-            lines.append(f"{i}. {an or '航空公司不明'}｜{format_date_pair(dd, rd)}｜{format_stops(stops)}｜{money(price)}")
+            lines.append(f"{i}. {money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{format_stops(stops)}")
 
-    lines.append("查詢：可點下方 Google Flights 按鈕重新查同一組條件。")
+    lines.append("查票：下方有 Google Flights 按鈕，開啟後會重新查即時價格。")
     return lines
 
 
@@ -492,29 +546,25 @@ def build_full_message(conn, analyses, routes, price_events, anomalies, failures
     no_data_n = sum(1 for a in active if a.get('today_min') is None)
     event_ids = {ev['id'] for ev in price_events}
 
-    if anomalies:
-        conclusion = f"有 {len(anomalies)} 條出現明顯降價，建議先檢查。"
-    elif price_events:
-        conclusion = f"有 {len(price_events)} 條值得注意。"
-    elif failures:
-        conclusion = f"有 {len(failures)} 條連續抓不到資料，需要檢查設定。"
-    elif no_data_n:
-        conclusion = f"有 {no_data_n} 條今天沒有抓到傳統航空資料。"
-    else:
-        conclusion = "系統正常，這次沒有達通知門檻。"
+    priority = priority_profile(price_events, anomalies, failures, no_data_n)
 
     lines = [
-        f"機票追蹤更新｜{now_str} 台北時間",
-        f"結論：{conclusion}",
-        f"本次掃描：{len(active)} 條路線，寫入 {total_today} 筆票價",
+        f"{priority['badge']}｜機票雷達",
+        f"{now_str} 台北時間",
+        "",
+        f"一句話：{priority['summary']}",
+        "",
+        "重點",
+        f"• 新機會 {len(price_events)}｜明顯降價 {len(anomalies)}｜需檢查 {len(failures)}",
+        f"• 掃描 {len(active)} 條路線｜寫入 {total_today} 筆票價",
     ]
     if no_data_n:
-        lines.append(f"資料提醒：其中 {no_data_n} 條今天沒有傳統航空票價")
+        lines.append(f"• {no_data_n} 條今天沒有傳統航空票價")
     lines.append("")
 
     # 異常下殺警報（最顯眼，放在最上面）
     if anomalies:
-        lines.append("明顯降價")
+        lines.append("💥 明顯降價")
         for al in anomalies:
             lines.append(
                 f"#{al['id']} {al['name']}：{money(al['yest'])} → {money(al['today'])}（{al['pct']:+.1f}%）"
@@ -522,20 +572,22 @@ def build_full_message(conn, analyses, routes, price_events, anomalies, failures
         lines.append("")
 
     if price_events:
-        lines.append("值得注意")
+        lines.append("🔥 新機會")
         for ev in price_events:
             lines.append(
-                f"#{ev['id']} {ev['name']}：{money(ev['today_min'])}｜{STATUS_LABEL.get(ev['status'], ev['status'])}｜{ev['reason']}"
+                f"#{ev['id']} {ev['name']}｜{money(ev['today_min'])}｜{STATUS_BADGE.get(ev['status'], ev['status'])}｜{ev['reason']}"
             )
         lines.append("")
 
     # 連續失敗警報
     if failures:
-        lines.append("需要檢查的路線")
+        lines.append("⚠️ 需要檢查")
         for fa in failures:
             ts = fa.get('last_success_ts') or '從未成功'
             lines.append(f"#{fa['id']} {fa['name']}：已連續 {fa['failures']} 次無資料，上次成功 {ts}")
         lines.append("")
+
+    lines.append("路線明細")
 
     for a in active:
         route = routes[a['route_id']]
@@ -544,7 +596,7 @@ def build_full_message(conn, analyses, routes, price_events, anomalies, failures
         lines.extend(build_route_block(conn, a, route, today_str, verbose=verbose))
         lines.append("")
 
-    lines.append("說明：Google Flights 開啟後仍會重新查價，實際票價與可訂位狀態以頁面顯示為準。")
+    lines.append("備註：Google Flights 會重新查即時價格；實際票價與可訂位狀態以頁面為準。")
 
     return "\n".join(lines).strip()
 
@@ -621,16 +673,7 @@ def build_status_payload(conn, analyses, routes, price_events, anomalies, failur
 
     active_routes = [r for r in route_items if r['active']]
     no_data_n = sum(1 for r in active_routes if r['today_min'] is None)
-    if anomalies:
-        conclusion = f"有 {len(anomalies)} 條明顯降價。"
-    elif price_events:
-        conclusion = f"有 {len(price_events)} 條值得注意。"
-    elif failures:
-        conclusion = f"有 {len(failures)} 條需要檢查。"
-    elif no_data_n:
-        conclusion = f"有 {no_data_n} 條今天沒有傳統航空資料。"
-    else:
-        conclusion = "系統正常，暫無新提醒。"
+    priority = priority_profile(price_events, anomalies, failures, no_data_n)
 
     return {
         'generated_at_utc': now_utc,
@@ -641,7 +684,8 @@ def build_status_payload(conn, analyses, routes, price_events, anomalies, failur
         'active_routes': len(active_routes),
         'scanned_routes': len(analyses),
         'total_written_today': total_today,
-        'conclusion': conclusion,
+        'priority': priority,
+        'conclusion': priority['summary'],
         'routes': route_items,
         'price_events': price_events,
         'anomalies': anomalies,

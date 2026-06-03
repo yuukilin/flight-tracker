@@ -358,6 +358,21 @@ function cabinText(cabins) {
   return (cabins || []).map((c) => CABIN_VAL_TO_LABEL[c] || c).join('/') || '未設定';
 }
 
+function statusBadge(status, fallback = '未判斷') {
+  const map = {
+    cheap: '💰 便宜',
+    good: '🟡 不錯',
+    normal: '⚪ 普通',
+    expensive: '⚪ 偏貴',
+    insufficient_data: '🔵 資料不足',
+  };
+  return map[status] || fallback;
+}
+
+function activeBadge(active) {
+  return active === false ? '⏸ 暫停' : '🟢 啟用';
+}
+
 function isPastRoute(route) {
   const end = route?.depart_date_range?.end;
   if (!end) return false;
@@ -381,29 +396,33 @@ function buildMenuStatusText(routes, status) {
   const activeRoutes = routes.filter((r) => r.active !== false);
   const pausedRoutes = routes.length - activeRoutes.length;
   const expiredRoutes = activeRoutes.filter(isPastRoute);
+  const priority = status?.priority || {};
+  const badge = priority.badge || '⚪ 未知';
   const lines = [
-    '機票追蹤總覽',
+    `${badge}｜機票雷達首頁`,
     '',
-    `追蹤路線：${activeRoutes.length} 條啟用${pausedRoutes ? `，${pausedRoutes} 條暫停` : ''}`,
   ];
 
   if (!status) {
-    lines.push('上次掃描：尚無狀態資料');
+    lines.push('一句話：還沒有最新掃描狀態。');
+    lines.push('');
+    lines.push(`追蹤：${activeRoutes.length} 條啟用${pausedRoutes ? `｜${pausedRoutes} 條暫停` : ''}`);
     lines.push('建議：先按「立即掃描」，掃完後這裡會顯示最低價與資料狀態。');
     return lines.join('\n');
   }
 
   const stale = statusIsStale(status);
-  lines.push(`上次掃描：${status.generated_at_taipei || status.generated_at_utc}`);
-  if (stale) lines.push('提醒：這份狀態超過 36 小時，可能已經不是最新結果。');
-  lines.push(`本次寫入：${status.total_written_today ?? 0} 筆票價`);
+  lines.push(`一句話：${priority.summary || status.conclusion || '暫無結論'}`);
+  lines.push('');
+  lines.push('重點');
+  lines.push(`• 追蹤 ${activeRoutes.length} 條啟用${pausedRoutes ? `｜${pausedRoutes} 條暫停` : ''}`);
+  lines.push(`• 寫入 ${status.total_written_today ?? 0} 筆票價｜掃描 ${status.scanned_routes ?? '?'} 條`);
+  lines.push(`• 上次掃描：${status.generated_at_taipei || status.generated_at_utc}`);
+  if (stale) lines.push('• ⚠️ 這份狀態超過 36 小時，可能已經不是最新結果');
   if (status.next_scheduled_scan_taipei) {
-    lines.push(`下次排程：${status.next_scheduled_scan_taipei}`);
+    lines.push(`• 下次排程：${status.next_scheduled_scan_taipei}`);
   }
-  lines.push(`結論：${status.conclusion || '暫無結論'}`);
-  if (expiredRoutes.length > 0) {
-    lines.push(`過期路線：${expiredRoutes.length} 條，建議暫停或複製後改日期。`);
-  }
+  if (expiredRoutes.length > 0) lines.push(`• 過期路線 ${expiredRoutes.length} 條，建議暫停或複製後改日期`);
   lines.push('');
 
   const byId = routeStatusById(status);
@@ -412,28 +431,29 @@ function buildMenuStatusText(routes, status) {
     return lines.join('\n');
   }
 
-  lines.push('各路線');
+  lines.push('路線快看');
   for (const route of activeRoutes.slice(0, 6)) {
     const item = byId.get(Number(route.id));
     const fallbackRoute = `${route.origin || '?'} → ${(route.destinations || []).join('/') || '?'}`;
+    lines.push('────────────');
     lines.push(`#${route.id} ${route.name}`);
     if (!item) {
       lines.push(`  ${fallbackRoute}｜尚無掃描資料`);
       continue;
     }
     const price = item.today_min === null || item.today_min === undefined
-      ? '沒有傳統航空票價'
-      : `最低 ${moneyText(item.today_min)}`;
-    const statusLabel = item.status_label || '未判斷';
-    lines.push(`  ${fallbackRoute}｜${cabinText(route.cabin_classes)}｜${price}｜${statusLabel}`);
-    lines.push(`  資料：傳統航空 ${item.traditional_count || 0} 筆，廉航 ${item.lcc_count || 0} 筆`);
+      ? '⚠️ 沒有傳統航空票價'
+      : `${moneyText(item.today_min)}｜${statusBadge(item.status, item.status_label || '未判斷')}`;
+    lines.push(`  ${fallbackRoute}｜${cabinText(route.cabin_classes)}`);
+    lines.push(`  今日：${price}`);
+    lines.push(`  資料：傳統 ${item.traditional_count || 0}｜廉航 ${item.lcc_count || 0}`);
     if (item.consecutive_failures) {
-      lines.push(`  注意：已連續 ${item.consecutive_failures} 次無資料`);
+      lines.push(`  ⚠️ 已連續 ${item.consecutive_failures} 次無資料`);
     }
   }
   if (activeRoutes.length > 6) lines.push(`另有 ${activeRoutes.length - 6} 條路線未列出，輸入 /list 查看。`);
   lines.push('');
-  lines.push('可點下方按鈕操作；要看查票連結請進 /list 或單一路線面板。');
+  lines.push('操作：下方按鈕可新增、掃描、看路線；查票連結在 /list 或單一路線面板。');
   return lines.join('\n');
 }
 
@@ -1248,19 +1268,15 @@ function formatRouteSummary(r) {
   const dests = (r.destinations || []).join(', ');
   const dep = r.depart_time_window || '不限';
   const ret = r.return_time_window || '不限';
-  const status = r.active === false ? '暫停' : '啟用';
   const weekendCount = r.must_contain_full_weekends ?? '?';
   return [
-    `${status} #${r.id ?? '?'} ${r.name}`,
-    `   出發：${r.origin}`,
-    `   抵達：${dests}`,
-    `   艙等：${cabins}`,
-    `   日期：${r.depart_date_range?.start ?? '?'} ~ ${r.depart_date_range?.end ?? '?'}`,
-    `   天數：${r.trip_duration_days} 天，需含 ${weekendCount} 個完整週末`,
-    `   時段：去 ${dep} / 回 ${ret}`,
-    `   轉機：最多 ${r.max_stops ?? 0} 次`,
-    `   價上限：${r.max_price_twd ? 'NT$ ' + r.max_price_twd.toLocaleString() : '不限'}`,
-    `   通知：${r.notify_threshold}`,
+    `${activeBadge(r.active)}｜#${r.id ?? '?'} ${r.name}`,
+    `${r.origin} → ${dests}`,
+    `${cabins}｜${r.trip_duration_days} 天｜跨 ${weekendCount} 週末`,
+    `${r.depart_date_range?.start ?? '?'} ~ ${r.depart_date_range?.end ?? '?'}`,
+    `轉機：最多 ${r.max_stops ?? 0} 次｜預算：${r.max_price_twd ? 'NT$ ' + r.max_price_twd.toLocaleString() : '不限'}`,
+    `時段：去 ${dep}｜回 ${ret}`,
+    `通知：${r.notify_threshold}`,
   ].join('\n');
 }
 
@@ -1912,7 +1928,7 @@ async function handleCallback(env, cb) {
     const { data: routesData } = await loadRoutes(env);
     const route = routesData.routes.find((x) => x.id === id);
     if (!route) return sendMsg(env, chatId, `找不到 #${id}`);
-    const text = `路線詳細\n\n${formatRouteSummary(route)}`;
+    const text = `📍 路線面板\n\n${formatRouteSummary(route)}\n\n下方按鈕可查價、看圖、診斷或修改設定。`;
     if (messageId) {
       const edited = await editMsg(env, chatId, messageId, text, routeButtons(route));
       if (edited?.ok) return;
@@ -1927,18 +1943,23 @@ async function cmdList(env, chatId) {
   if (data.routes.length === 0) {
     return sendMsg(env, chatId, '尚無追蹤航線。點「新增路線」開始。', mainMenuOpts());
   }
-  const lines = ['追蹤中的航線', ''];
+  const activeCount = data.routes.filter((r) => r.active !== false).length;
+  const lines = [
+    `📋 我的路線｜${activeCount} 條啟用 / ${data.routes.length} 條總計`,
+    '',
+  ];
   for (const r of data.routes) {
-    const status = r.active === false ? '暫停' : '啟用';
-    const cabins = (r.cabin_classes || []).join(',');
+    const status = activeBadge(r.active);
+    const cabins = cabinText(r.cabin_classes);
     const dests = (r.destinations || []).join('/');
+    lines.push('────────────');
     lines.push(`${status}｜#${r.id} ${r.name}`);
-    lines.push(`   ${r.origin}→${dests}（${cabins}）`);
-    lines.push(`   ${r.depart_date_range?.start}~${r.depart_date_range?.end} 共 ${r.trip_duration_days} 天`);
-    lines.push(`   通知門檻：${r.notify_threshold}`);
+    lines.push(`${r.origin} → ${dests}｜${cabins}`);
+    lines.push(`${r.depart_date_range?.start} ~ ${r.depart_date_range?.end}｜${r.trip_duration_days} 天`);
+    lines.push(`通知：${r.notify_threshold}`);
     lines.push('');
   }
-  lines.push('點下面路線可以直接操作。');
+  lines.push('下方每條路線都有「操作」和「查票」。');
   const buttons = data.routes.map((r) => [
     { text: `操作 #${r.id} ${r.name}`, callback_data: `route:${r.id}` },
     { text: '查票', url: googleFlightsUrl(r) },
@@ -1951,7 +1972,7 @@ async function cmdShow(env, chatId, id) {
   const { data } = await loadRoutes(env);
   const r = data.routes.find((x) => x.id === id);
   if (!r) return sendMsg(env, chatId, `找不到 #${id}`);
-  const text = `路線詳細\n\n${formatRouteSummary(r)}`;
+  const text = `📍 路線面板\n\n${formatRouteSummary(r)}\n\n下方按鈕可查價、看圖、診斷或修改設定。`;
   await sendMsg(env, chatId, text, routeButtons(r));
 }
 
@@ -2225,5 +2246,10 @@ async function handleRouteEditField(env, chatId, text, state) {
   await saveRoutes(env, data, sha, `Edit route #${id} ${state.field} via bot buttons`);
   await env.STATE.delete(`dlg:${chatId}`);
   await sendMsg(env, chatId, `#${id} ${choice.label.replace(/^改/, '')}已更新`, removeKbOpts());
-  return sendMsg(env, chatId, `路線詳細\n\n${formatRouteSummary(route)}`, routeButtons(route));
+  return sendMsg(
+    env,
+    chatId,
+    `📍 路線面板\n\n${formatRouteSummary(route)}\n\n下方按鈕可查價、看圖、診斷或修改設定。`,
+    routeButtons(route)
+  );
 }

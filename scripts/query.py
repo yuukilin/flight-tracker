@@ -247,14 +247,27 @@ def action_history(rid, days, chat_id):
 
     if not daily:
         buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
-        send_text(chat_id, f"#{rid} {name}\n過去 {days} 天沒有傳統航空資料。", buttons=buttons)
+        send_text(
+            chat_id,
+            f"📈 #{rid} {name}｜每日最低\n\n一句話：過去 {days} 天沒有傳統航空資料。\n建議：先開 Google Flights 或跑 /debug {rid} 檢查抓取狀態。",
+            buttons=buttons,
+        )
         return
 
-    lines = [f"#{rid} {name}", f"過去 {days} 天每日最低（傳統航空）"]
+    best_day = min(daily, key=daily.get)
+    latest_day = max(daily)
+    lines = [
+        f"📈 #{rid} {name}｜每日最低",
+        "",
+        f"一句話：過去 {days} 天最低是 {best_day} 的 NT$ {daily[best_day]:,}。",
+        f"最新一天：{latest_day}｜NT$ {daily[latest_day]:,}｜{counts[latest_day]} 筆",
+        "",
+        "每日明細（傳統航空）",
+    ]
     for d in sorted(daily.keys(), reverse=True):
         lines.append(f"{d}：NT$ {daily[d]:,}（{counts[d]} 筆）")
     lines.append("")
-    lines.append("可用下方按鈕重新開 Google Flights 查目前票價。")
+    lines.append("查票：下方按鈕會開 Google Flights 重新查即時價格。")
     buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
     send_text(chat_id, '\n'.join(lines), buttons=buttons)
 
@@ -288,21 +301,28 @@ def action_best(rid, chat_id, limit=5):
 
     best_rows = sorted(best_by_key.values(), key=lambda row: row[0])[:limit]
     if not best_rows:
-        send_text(chat_id, f"#{rid} {name}\n歷史最低：目前沒有傳統航空資料。")
+        send_text(chat_id, f"🏆 #{rid} {name}｜歷史最低\n\n一句話：目前沒有傳統航空資料可排名。")
         return
 
-    lines = [f"#{rid} {name}", f"歷史最低 {limit} 筆（傳統航空）"]
+    best_price, best_airline, best_dd, best_rd, best_dest, best_stops = best_rows[0]
+    lines = [
+        f"🏆 #{rid} {name}｜歷史最低",
+        "",
+        f"一句話：目前最低是 {money(best_price)}，{best_airline}，{best_dd} → {best_rd}。",
+        "",
+        f"最低 {limit} 筆（傳統航空）",
+    ]
     buttons = []
     for i, (p, an, dd, rd, dest, stops) in enumerate(best_rows, 1):
         s = "直飛" if stops == 0 else f"轉機 {stops} 次"
-        lines.append(f"{i}. NT$ {p:,}｜{an}｜{dd} 去，{rd} 回｜{dest}｜{s}")
+        lines.append(f"{i}. {money(p)}｜{an}｜{dd} → {rd}｜{dest}｜{s}")
         row = [{'text': f"第 {i} 筆 Google Flights", 'url': google_flights_url(route, dd, rd, dest)}]
         airline_url = airline_search_url(an)
         if airline_url:
             row.append({'text': '搜尋航空公司官網', 'url': airline_url})
         buttons.append(row)
     lines.append("")
-    lines.append("說明：Google Flights 開啟後會重新查價，實際票價與可訂位狀態以頁面顯示為準。")
+    lines.append("備註：Google Flights 開啟後會重新查價，實際票價與可訂位狀態以頁面顯示為準。")
     send_text(chat_id, '\n'.join(lines), buttons=buttons)
 
 
@@ -343,7 +363,7 @@ def action_chart(rid, days, chat_id):
 
     if not daily:
         buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
-        send_text(chat_id, f"#{rid} {name}\n過去 {days} 天沒有傳統航空資料可畫。", buttons=buttons)
+        send_text(chat_id, f"📉 #{rid} {name}｜走勢圖\n\n一句話：過去 {days} 天沒有傳統航空資料可畫。", buttons=buttons)
         return
 
     dates = sorted(daily.keys())
@@ -362,7 +382,7 @@ def action_chart(rid, days, chat_id):
     fig.savefig(out, dpi=120)
     plt.close(fig)
 
-    caption = f"#{rid} {name}\n過去 {days} 天最低價走勢（傳統航空）"
+    caption = f"📉 #{rid} {name}｜走勢圖\n過去 {days} 天最低價（傳統航空）"
     buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
     send_photo(chat_id, out, caption=caption, buttons=buttons)
 
@@ -375,8 +395,9 @@ def action_debug(rid, chat_id):
         return
 
     lines = [
-        f"#{rid} {name}",
-        "抓取診斷",
+        f"🧪 #{rid} {name}｜抓取診斷",
+        "",
+        "先看結論：下面「設定核對」若顯示一致，代表抓取方向大致正確。",
         "",
         "路線設定",
         route_label(route),
@@ -391,7 +412,7 @@ def action_debug(rid, chat_id):
     route_state = (state.get('routes') or {}).get(str(rid), {})
     if route_state:
         lines.extend([
-            "最近一次掃描狀態",
+            "最近掃描",
             f"last_scan_ts：{route_state.get('last_scan_ts', '無')}",
             f"last_success_ts：{route_state.get('last_success_ts', '無')}",
             f"last_written：{route_state.get('last_written', 0)} 筆",
@@ -400,7 +421,7 @@ def action_debug(rid, chat_id):
         ])
     else:
         lines.extend([
-            "最近一次掃描狀態",
+            "最近掃描",
             "scrape_state.json 尚無這條路線紀錄。",
             "",
         ])
@@ -452,7 +473,7 @@ def action_debug(rid, chat_id):
             lcc.append(item)
 
     lines.extend([
-        "最新資料庫內容",
+        "最新資料庫",
         f"最新掃描日期：{latest_date}",
         f"最新 scan_ts：{latest_ts}",
         f"總筆數：{len(rows)} 筆",
