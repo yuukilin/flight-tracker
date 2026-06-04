@@ -158,7 +158,7 @@ const ADD_DEFAULTS = {
   max_price_twd: 0,
   depart_time_window: null,
   return_time_window: null,
-  max_stops: 1,
+  max_stops: 0,
 };
 
 const NATURAL_ADD_DEFAULTS = {
@@ -2142,7 +2142,7 @@ async function sendAddConfirmPreview(env, chatId, state, intro) {
   await sendMsg(
     env,
     chatId,
-    `${intro}\n\n${preview}\n\n我已先用推薦設定：不限預算、去回時段不限、最多轉 1 次。\n按下方按鈕確認、修改或取消。`,
+    `${intro}\n\n${preview}\n\n我已先用推薦設定：不限預算、去回時段不限、預設直飛（最多轉 0 次）。\n按下方按鈕確認、修改或取消。`,
     addConfirmOpts()
   );
 }

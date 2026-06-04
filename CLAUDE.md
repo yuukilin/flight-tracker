@@ -16,8 +16,9 @@
 - 使用者完全用 Telegram bot 管理路線（/add /list /remove /scan）
 - 不放 VPS，全部跑在 GitHub Actions + Cloudflare Workers
 
-**新對話接手重點（2026-06-03 更新）：**
+**新對話接手重點（2026-06-04 更新）：**
 - Telegram bot 已支援一句話新增、按鈕修改路線、抓取診斷、Google Flights 查票按鈕。
+- `/add` 新增路線的預設轉機條件是直飛（`max_stops: 0`）；若要接受轉機，新增後用 `/edit` 改。
 - `/menu` 已改成狀態面板：顯示上次掃描、寫入筆數、各路線最低價、資料量、下次排程。
 - GitHub Actions 掃描後會產出 `data/status.json`，並同步到 Cloudflare KV，供 `/menu` 即時讀取。
 - 通知已加入去重：同一條路線若價格沒有更低、狀態沒有變好、最低組合沒有變化，就不再重複當成新提醒。
@@ -147,7 +148,7 @@ flight-tracker/
 
 ---
 
-## 五、現在的狀態（2026-06-03 已上線更新）
+## 五、現在的狀態（2026-06-04 已上線更新）
 
 ### ✅ 已完成
 1. **階段 0–4**：GitHub repo、Actions 排程、Python scrape pipeline、Telegram 推播全部跑通
@@ -171,6 +172,7 @@ flight-tracker/
 19. `notified_state.json` 已加入通知去重，避免同價格或同狀態重複提醒
 20. `/remove` 已改成不用記 ID；沒帶 ID 時會顯示刪除選單，`/list` 每條路線也有刪除按鈕
 21. 所有需要路線 ID 的指令已改成可點選路線；`/edit` 不帶 ID 會先選路線，再選欄位
+22. `/add` 新增路線的轉機預設已改成直飛（`max_stops: 0`）；既有路線不自動改動
 
 ### ⏳ 進行中
 - 觀察下一次 GitHub Actions 實跑後，確認 `/menu` 是否成功顯示最新 `status.json`。
