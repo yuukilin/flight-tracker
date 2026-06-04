@@ -31,7 +31,7 @@
       "max_price_twd": 0,
       "depart_time_window": null,
       "return_time_window": null,
-      "max_stops": 1,
+      "max_stops": 0,
       "destinations": [
         "CTS"
       ],
