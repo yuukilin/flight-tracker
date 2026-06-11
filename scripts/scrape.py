@@ -17,6 +17,7 @@ import urllib.request
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 import logging
+from zoneinfo import ZoneInfo
 
 from fast_flights import FlightData, Passengers, get_flights
 
@@ -30,6 +31,7 @@ LCC_YAML = ROOT / 'excluded_airlines.yaml'
 DB_PATH = ROOT / 'data' / 'prices.db'
 FX_CACHE_PATH = ROOT / 'data' / 'last_fx.json'
 STATE_PATH = ROOT / 'data' / 'scrape_state.json'
+TAIPEI = ZoneInfo('Asia/Taipei')
 
 FX_DEFAULT = 32.0
 OLD_DATA_DAYS = 365  # 超過幾天的舊資料會被清掉
@@ -158,6 +160,10 @@ def init_db():
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_route_depart ON prices(route_id, depart_date)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_scan_ts ON prices(scan_ts)")
+    existing_cols = {row[1] for row in c.execute("PRAGMA table_info(prices)").fetchall()}
+    for col_name in ('return_depart_time', 'return_arrive_time'):
+        if col_name not in existing_cols:
+            c.execute(f"ALTER TABLE prices ADD COLUMN {col_name} TEXT")
     conn.commit()
     return conn
 
@@ -168,7 +174,7 @@ def cleanup_invalid_rows(conn):
 
 def cleanup_old_data(conn, days=OLD_DATA_DAYS):
     cur = conn.execute(
-        "DELETE FROM prices WHERE DATE(scan_ts) < DATE('now', ?)",
+        "DELETE FROM prices WHERE DATE(scan_ts, '+8 hours') < DATE('now', '+8 hours', ?)",
         (f'-{days} day',)
     )
     log.info(f"清理 >{days} 天舊資料：{cur.rowcount} 筆")
@@ -270,6 +276,13 @@ def in_window(t_str, window):
         return True
     return window[0] <= t <= window[1]
 
+def first_attr(obj, names):
+    for name in names:
+        value = getattr(obj, name, None)
+        if value:
+            return value
+    return ''
+
 # ─────────── fast-flights ───────────
 
 CABIN_MAP = {
@@ -348,6 +361,14 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
 
                     depart_time_str = getattr(f, 'departure', '') or ''
                     arrive_time_str = getattr(f, 'arrival', '') or ''
+                    return_depart_time_str = first_attr(f, (
+                        'return_departure', 'return_depart_time', 'return_departure_time',
+                        'returning_departure', 'inbound_departure', 'inbound_depart_time',
+                    ))
+                    return_arrive_time_str = first_attr(f, (
+                        'return_arrival', 'return_arrive_time', 'return_arrival_time',
+                        'returning_arrival', 'inbound_arrival', 'inbound_arrive_time',
+                    ))
 
                     stops_raw = getattr(f, 'stops', 0)
                     if isinstance(stops_raw, int):
@@ -367,18 +388,20 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
                     if not in_window(depart_time_str, depart_win):
                         continue
 
-                    days_before = (depart_d - date.today()).days
+                    days_before = (depart_d - datetime.now(TAIPEI).date()).days
 
                     conn.execute("""
                         INSERT INTO prices (
                             route_id, scan_ts, depart_date, return_date, days_before_depart,
                             airline_code, airline_name, flight_no, cabin, is_lcc, price_twd,
-                            depart_time, arrive_time, stops, origin, destination
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            depart_time, arrive_time, stops, origin, destination,
+                            return_depart_time, return_arrive_time
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (
                         route['id'], scan_ts, depart_d.isoformat(), return_d.isoformat(), days_before,
                         airline_code, airline, '', cabin, int(is_lcc), price,
-                        depart_time_str, arrive_time_str, stops, route['origin'], dest
+                        depart_time_str, arrive_time_str, stops, route['origin'], dest,
+                        return_depart_time_str, return_arrive_time_str
                     ))
                     written += 1
 

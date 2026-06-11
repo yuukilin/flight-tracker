@@ -14,9 +14,11 @@ import os
 import sqlite3
 import json
 import yaml
+import re
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).parent.parent
 DB_PATH = ROOT / 'data' / 'prices.db'
@@ -25,6 +27,8 @@ SCRAPE_STATE_JSON = ROOT / 'data' / 'scrape_state.json'
 LCC_YAML = ROOT / 'excluded_airlines.yaml'
 
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TAIPEI = ZoneInfo('Asia/Taipei')
+SCAN_DATE_SQL = "DATE(scan_ts, '+8 hours')"
 
 CABIN_QUERY_LABEL = {
     'economy': 'economy',
@@ -164,6 +168,46 @@ def money(n):
     return f"NT$ {int(n):,}"
 
 
+def today_taipei():
+    return datetime.now(TAIPEI).date()
+
+
+def price_columns(conn):
+    return {row[1] for row in conn.execute("PRAGMA table_info(prices)").fetchall()}
+
+
+def optional_time_exprs(conn):
+    cols = price_columns(conn)
+    return (
+        'return_depart_time' if 'return_depart_time' in cols else 'NULL',
+        'return_arrive_time' if 'return_arrive_time' in cols else 'NULL',
+    )
+
+
+def format_time_short(value):
+    if not value:
+        return '時間不明'
+    raw = ' '.join(str(value).strip().split())
+    if not raw:
+        return '時間不明'
+    time_part = re.split(r'\s+on\s+', raw, maxsplit=1)[0].strip()
+    time_part = re.sub(r'\s*\+\d+$', '', time_part).strip()
+    for fmt in ('%I:%M %p', '%H:%M'):
+        try:
+            return datetime.strptime(time_part, fmt).strftime('%H:%M')
+        except ValueError:
+            pass
+    return time_part or raw
+
+
+def format_flight_times(depart_time, arrive_time, return_depart_time=None, return_arrive_time=None):
+    outbound = f"去程 {format_time_short(depart_time)}→{format_time_short(arrive_time)}"
+    if return_depart_time or return_arrive_time:
+        inbound = f"回程 {format_time_short(return_depart_time)}→{format_time_short(return_arrive_time)}"
+        return f"{outbound}｜{inbound}"
+    return f"{outbound}｜回程時間待確認"
+
+
 def stops_label(stops):
     if stops in (None, ''):
         return '轉機不明'
@@ -172,7 +216,7 @@ def stops_label(stops):
 
 def get_latest_scan_date(conn, rid):
     row = conn.execute(
-        "SELECT DATE(MAX(scan_ts)), MAX(scan_ts) FROM prices WHERE route_id = ?",
+        f"SELECT DATE(MAX(scan_ts), '+8 hours'), MAX(scan_ts) FROM prices WHERE route_id = ?",
         (rid,),
     ).fetchone()
     if not row or not row[0]:
@@ -206,8 +250,8 @@ def unique_price_rows(rows, limit):
     seen = set()
     out = []
     for row in rows:
-        price, airline_name, _, dd, rd, dest, stops, _, cabin = row
-        key = (price, airline_name, dd, rd, dest, stops, cabin)
+        price, airline_name, _, dd, rd, dest, stops, _, cabin, *times = row
+        key = (price, airline_name, dd, rd, dest, stops, cabin, *times)
         if key in seen:
             continue
         seen.add(key)
@@ -224,13 +268,13 @@ def action_history(rid, days, chat_id):
     route = load_route(rid)
     name = route['name'] if route else f"#{rid}"
     conn = sqlite3.connect(DB_PATH)
-    today = date.today()
+    today = today_taipei()
     d_from = (today - timedelta(days=days)).isoformat()
-    rows = conn.execute("""
-        SELECT DATE(scan_ts) AS d, price_twd, airline_name, airline_code, is_lcc
+    rows = conn.execute(f"""
+        SELECT {SCAN_DATE_SQL} AS d, price_twd, airline_name, airline_code, is_lcc
         FROM prices
         WHERE route_id = ?
-          AND DATE(scan_ts) >= ?
+          AND {SCAN_DATE_SQL} >= ?
           AND airline_name IS NOT NULL
           AND TRIM(airline_name) <> ''
     """, (rid, d_from)).fetchall()
@@ -279,43 +323,49 @@ def action_best(rid, chat_id, limit=5):
     route = load_route(rid)
     name = route['name'] if route else f"#{rid}"
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
-        SELECT price_twd, airline_name, airline_code, depart_date, return_date, destination, stops, is_lcc
+    return_depart_expr, return_arrive_expr = optional_time_exprs(conn)
+    rows = conn.execute(f"""
+        SELECT price_twd, airline_name, airline_code, depart_date, return_date,
+               destination, stops, is_lcc, depart_time, arrive_time,
+               {return_depart_expr} AS return_depart_time,
+               {return_arrive_expr} AS return_arrive_time
         FROM prices
         WHERE route_id = ?
           AND airline_name IS NOT NULL
           AND TRIM(airline_name) <> ''
-        ORDER BY price_twd ASC
+        ORDER BY price_twd ASC, COALESCE(depart_time, '')
     """, (rid,)).fetchall()
     conn.close()
 
     lcc_codes, lcc_keywords = load_lcc_config()
     best_by_key = {}
-    for price, airline_name, airline_code, dd, rd, dest, stops, is_lcc in rows:
+    for price, airline_name, airline_code, dd, rd, dest, stops, is_lcc, dep_t, arr_t, ret_dep_t, ret_arr_t in rows:
         if not is_traditional_flight(airline_name, airline_code, is_lcc, lcc_codes, lcc_keywords):
             continue
         key = (airline_name, dd, rd, dest)
         old = best_by_key.get(key)
         if old is None or price < old[0]:
-            best_by_key[key] = (price, airline_name, dd, rd, dest, stops)
+            best_by_key[key] = (price, airline_name, dd, rd, dest, stops, dep_t, arr_t, ret_dep_t, ret_arr_t)
 
     best_rows = sorted(best_by_key.values(), key=lambda row: row[0])[:limit]
     if not best_rows:
         send_text(chat_id, f"🏆 #{rid} {name}｜歷史最低\n\n一句話：目前沒有傳統航空資料可排名。")
         return
 
-    best_price, best_airline, best_dd, best_rd, best_dest, best_stops = best_rows[0]
+    best_price, best_airline, best_dd, best_rd, best_dest, best_stops, best_dep_t, best_arr_t, best_ret_dep_t, best_ret_arr_t = best_rows[0]
+    best_times = format_flight_times(best_dep_t, best_arr_t, best_ret_dep_t, best_ret_arr_t)
     lines = [
         f"🏆 #{rid} {name}｜歷史最低",
         "",
-        f"一句話：目前最低是 {money(best_price)}，{best_airline}，{best_dd} → {best_rd}。",
+        f"一句話：目前最低是 {money(best_price)}，{best_airline}，{best_dd} → {best_rd}，{best_times}。",
         "",
         f"最低 {limit} 筆（傳統航空）",
     ]
     buttons = []
-    for i, (p, an, dd, rd, dest, stops) in enumerate(best_rows, 1):
+    for i, (p, an, dd, rd, dest, stops, dep_t, arr_t, ret_dep_t, ret_arr_t) in enumerate(best_rows, 1):
         s = "直飛" if stops == 0 else f"轉機 {stops} 次"
-        lines.append(f"{i}. {money(p)}｜{an}｜{dd} → {rd}｜{dest}｜{s}")
+        times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
+        lines.append(f"{i}. {money(p)}｜{an}｜{dd} → {rd}｜{times}｜{dest}｜{s}")
         row = [{'text': f"第 {i} 筆 Google Flights", 'url': google_flights_url(route, dd, rd, dest)}]
         airline_url = airline_search_url(an)
         if airline_url:
@@ -342,13 +392,13 @@ def action_chart(rid, days, chat_id):
     route = load_route(rid)
     name = route['name'] if route else f"#{rid}"
     conn = sqlite3.connect(DB_PATH)
-    today = date.today()
+    today = today_taipei()
     d_from = (today - timedelta(days=days)).isoformat()
-    rows = conn.execute("""
-        SELECT DATE(scan_ts) AS d, price_twd, airline_name, airline_code, is_lcc
+    rows = conn.execute(f"""
+        SELECT {SCAN_DATE_SQL} AS d, price_twd, airline_name, airline_code, is_lcc
         FROM prices
         WHERE route_id = ?
-          AND DATE(scan_ts) >= ?
+          AND {SCAN_DATE_SQL} >= ?
           AND airline_name IS NOT NULL
           AND TRIM(airline_name) <> ''
     """, (rid, d_from)).fetchall()
@@ -440,20 +490,23 @@ def action_debug(rid, chat_id):
         send_text(chat_id, '\n'.join(lines))
         return
 
-    rows = conn.execute("""
+    return_depart_expr, return_arrive_expr = optional_time_exprs(conn)
+    rows = conn.execute(f"""
         SELECT price_twd, airline_name, airline_code, depart_date, return_date,
-               destination, stops, is_lcc, origin, cabin
+               destination, stops, is_lcc, origin, cabin, depart_time, arrive_time,
+               {return_depart_expr} AS return_depart_time,
+               {return_arrive_expr} AS return_arrive_time
         FROM prices
         WHERE route_id = ?
-          AND DATE(scan_ts) = ?
+          AND {SCAN_DATE_SQL} = ?
         ORDER BY price_twd ASC
     """, (rid, latest_date)).fetchall()
 
-    breakdown = conn.execute("""
+    breakdown = conn.execute(f"""
         SELECT origin, destination, cabin, COUNT(*), MIN(price_twd)
         FROM prices
         WHERE route_id = ?
-          AND DATE(scan_ts) = ?
+          AND {SCAN_DATE_SQL} = ?
         GROUP BY origin, destination, cabin
         ORDER BY COUNT(*) DESC
     """, (rid, latest_date)).fetchall()
@@ -462,11 +515,11 @@ def action_debug(rid, chat_id):
     traditional = []
     lcc = []
     blank_airline = 0
-    for price, airline_name, airline_code, dd, rd, dest, stops, is_lcc, origin, cabin in rows:
+    for price, airline_name, airline_code, dd, rd, dest, stops, is_lcc, origin, cabin, dep_t, arr_t, ret_dep_t, ret_arr_t in rows:
         if not (airline_name or '').strip():
             blank_airline += 1
             continue
-        item = (price, airline_name, airline_code, dd, rd, dest, stops, origin, cabin)
+        item = (price, airline_name, airline_code, dd, rd, dest, stops, origin, cabin, dep_t, arr_t, ret_dep_t, ret_arr_t)
         if is_traditional_flight(airline_name, airline_code, is_lcc, lcc_codes, lcc_keywords):
             traditional.append(item)
         else:
@@ -497,8 +550,9 @@ def action_debug(rid, chat_id):
 
     if traditional:
         lines.append("傳統航空最低 5 筆")
-        for i, (price, airline_name, _, dd, rd, dest, stops, _, cabin) in enumerate(unique_price_rows(traditional, 5), 1):
-            lines.append(f"{i}. {money(price)}｜{airline_name}｜{dd} 去，{rd} 回｜{dest}｜{cabin}｜{stops_label(stops)}")
+        for i, (price, airline_name, _, dd, rd, dest, stops, _, cabin, dep_t, arr_t, ret_dep_t, ret_arr_t) in enumerate(unique_price_rows(traditional, 5), 1):
+            times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
+            lines.append(f"{i}. {money(price)}｜{airline_name}｜{dd} 去，{rd} 回｜{times}｜{dest}｜{cabin}｜{stops_label(stops)}")
     else:
         lines.append("傳統航空最低 5 筆")
         lines.append("沒有可列出的傳統航空票價。")
@@ -506,8 +560,9 @@ def action_debug(rid, chat_id):
 
     if lcc:
         lines.append("廉航參考 3 筆")
-        for i, (price, airline_name, _, dd, rd, dest, stops, _, cabin) in enumerate(unique_price_rows(lcc, 3), 1):
-            lines.append(f"{i}. {money(price)}｜{airline_name}｜{dd} 去，{rd} 回｜{dest}｜{cabin}｜{stops_label(stops)}")
+        for i, (price, airline_name, _, dd, rd, dest, stops, _, cabin, dep_t, arr_t, ret_dep_t, ret_arr_t) in enumerate(unique_price_rows(lcc, 3), 1):
+            times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
+            lines.append(f"{i}. {money(price)}｜{airline_name}｜{dd} 去，{rd} 回｜{times}｜{dest}｜{cabin}｜{stops_label(stops)}")
         lines.append("提醒：廉航通常未含行李費，僅供參考。")
         lines.append("")
 

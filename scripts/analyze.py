@@ -7,9 +7,10 @@
 import sqlite3
 import yaml
 import json
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 import logging
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger(__name__)
@@ -19,6 +20,8 @@ DB_PATH = ROOT / 'data' / 'prices.db'
 ROUTES_YAML = ROOT / 'routes.yaml'
 ROUTES_JSON = ROOT / 'routes.json'
 OUTPUT_JSON = ROOT / 'data' / 'analysis.json'
+TAIPEI = ZoneInfo('Asia/Taipei')
+SCAN_DATE_SQL = "DATE(scan_ts, '+8 hours')"
 
 def load_routes():
     if ROUTES_JSON.exists():
@@ -37,14 +40,28 @@ def percentile(sorted_values, p):
         return sorted_values[f]
     return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
 
+def history_stats(history):
+    stats = {'count': len(history)}
+    if not history:
+        return stats
+    sorted_history = sorted(history)
+    stats.update({
+        'min': sorted_history[0],
+        'p25': percentile(sorted_history, 25),
+        'p50': percentile(sorted_history, 50),
+        'p75': percentile(sorted_history, 75),
+        'max': sorted_history[-1],
+    })
+    return stats
+
 def analyze_route(conn, route):
-    today = date.today()
+    today = datetime.now(TAIPEI).date()
     today_str = today.isoformat()
 
-    cur = conn.execute("""
+    cur = conn.execute(f"""
         SELECT MIN(price_twd) FROM prices
         WHERE route_id = ?
-          AND DATE(scan_ts) = ?
+          AND {SCAN_DATE_SQL} = ?
           AND is_lcc = 0
     """, (route['id'], today_str))
     today_min = cur.fetchone()[0]
@@ -60,11 +77,11 @@ def analyze_route(conn, route):
     def get_history(days):
         d_from = (today - timedelta(days=days)).isoformat()
         d_to = (today - timedelta(days=1)).isoformat()
-        cur = conn.execute("""
-            SELECT DATE(scan_ts) as d, MIN(price_twd)
+        cur = conn.execute(f"""
+            SELECT {SCAN_DATE_SQL} as d, MIN(price_twd)
             FROM prices
             WHERE route_id = ?
-              AND DATE(scan_ts) BETWEEN ? AND ?
+              AND {SCAN_DATE_SQL} BETWEEN ? AND ?
               AND is_lcc = 0
             GROUP BY d
             ORDER BY MIN(price_twd)
@@ -74,6 +91,9 @@ def analyze_route(conn, route):
     history_30 = get_history(30)
     history_90 = get_history(90)
     history_365 = get_history(365)
+    history_stats_30 = history_stats(history_30)
+    history_stats_90 = history_stats(history_90)
+    history_stats_365 = history_stats(history_365)
 
     def classify(today_min, history):
         if len(history) < 7:
@@ -99,6 +119,9 @@ def analyze_route(conn, route):
         'history_count_30': len(history_30),
         'history_count_90': len(history_90),
         'history_count_365': len(history_365),
+        'history_stats_30': history_stats_30,
+        'history_stats_90': history_stats_90,
+        'history_stats_365': history_stats_365,
     }
 
 def main():

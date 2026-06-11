@@ -4,8 +4,6 @@ on:
   schedule:
     # 台灣時間 09:00 = UTC 01:00
     - cron: '0 1 * * *'
-    # 台灣時間 21:00 = UTC 13:00
-    - cron: '0 13 * * *'
   workflow_dispatch:    # 允許手動觸發（Cloudflare Worker 的 /scan 也走這條）
 
 jobs:

@@ -45,7 +45,7 @@
 │  - data/ 不在 git（用 Actions cache + Artifacts 管理）           │
 └───────────┬──────────────────────────────────▲────────────────┘
             │                                  │
-            ▼ cron 09:00 / 21:00 (台北)         │ commit data
+            ▼ cron 09:00 (台北)                │ commit data
 ┌────────────────────────────────────────────────────────────────┐
 │  GitHub Actions (.github/workflows/scrape.yml)                 │
 │  1. Restore prices.db from cache                               │
@@ -71,7 +71,7 @@ flight-tracker/
 ├── .gitignore                    ← 排除 data/prices.db, data/analysis.json
 ├── .github/
 │   └── workflows/
-│       └── scrape.yml            ← Actions 排程：cron 0 1,13 * * *（UTC）
+│       └── scrape.yml            ← Actions 排程：cron 0 1 * * *（UTC）
 ├── data/
 │   └── .gitkeep                  ← 空資料夾佔位（prices.db 不入 git）
 ├── scripts/

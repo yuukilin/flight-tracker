@@ -19,7 +19,8 @@ import json
 import yaml
 import requests
 import sqlite3
-from datetime import date, datetime, timedelta
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 import logging
 from urllib.parse import quote_plus
@@ -36,6 +37,8 @@ ANALYSIS_JSON = ROOT / 'data' / 'analysis.json'
 SCRAPE_STATE_JSON = ROOT / 'data' / 'scrape_state.json'
 STATUS_JSON = ROOT / 'data' / 'status.json'
 NOTIFIED_STATE_JSON = ROOT / 'data' / 'notified_state.json'
+TAIPEI = ZoneInfo('Asia/Taipei')
+SCAN_DATE_SQL = "DATE(scan_ts, '+8 hours')"
 
 TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_IDS = [c.strip() for c in os.environ['TELEGRAM_CHAT_ID'].split(',') if c.strip()]
@@ -133,29 +136,52 @@ def should_notify(threshold, status):
 
 # ─────────── SQLite 查詢 ───────────
 
+_PRICE_COLUMNS = None
+
+def price_columns(conn):
+    global _PRICE_COLUMNS
+    if _PRICE_COLUMNS is None:
+        _PRICE_COLUMNS = {row[1] for row in conn.execute("PRAGMA table_info(prices)").fetchall()}
+    return _PRICE_COLUMNS
+
 def get_top_flights(conn, route_id, today_str, is_lcc, limit=3):
-    cur = conn.execute("""
-        SELECT airline_name, depart_date, return_date, MIN(price_twd) as p,
-               MIN(depart_time), MIN(stops), destination
-        FROM prices
-        WHERE route_id = ?
-          AND DATE(scan_ts) = ?
-          AND is_lcc = ?
-        GROUP BY airline_name, depart_date, return_date, destination
-        ORDER BY p ASC
+    cols = price_columns(conn)
+    return_depart_expr = "return_depart_time" if "return_depart_time" in cols else "NULL"
+    return_arrive_expr = "return_arrive_time" if "return_arrive_time" in cols else "NULL"
+    cur = conn.execute(f"""
+        SELECT airline_name, depart_date, return_date, price_twd,
+               depart_time, arrive_time, stops, destination,
+               return_depart_time, return_arrive_time
+        FROM (
+            SELECT
+                airline_name, depart_date, return_date, price_twd,
+                depart_time, arrive_time, stops, destination,
+                {return_depart_expr} AS return_depart_time,
+                {return_arrive_expr} AS return_arrive_time,
+                ROW_NUMBER() OVER (
+                    PARTITION BY airline_name, depart_date, return_date, destination
+                    ORDER BY price_twd ASC, COALESCE(depart_time, ''), id ASC
+                ) AS rn
+            FROM prices
+            WHERE route_id = ?
+              AND {SCAN_DATE_SQL} = ?
+              AND is_lcc = ?
+        )
+        WHERE rn = 1
+        ORDER BY price_twd ASC, COALESCE(depart_time, ''), airline_name
         LIMIT ?
     """, (route_id, today_str, is_lcc, limit))
     return cur.fetchall()
 
 
 def get_today_counts(conn, route_id, today_str):
-    cur = conn.execute("""
+    cur = conn.execute(f"""
         SELECT
             SUM(CASE WHEN is_lcc = 0 THEN 1 ELSE 0 END),
             SUM(CASE WHEN is_lcc = 1 THEN 1 ELSE 0 END)
         FROM prices
         WHERE route_id = ?
-          AND DATE(scan_ts) = ?
+          AND {SCAN_DATE_SQL} = ?
     """, (route_id, today_str))
     r = cur.fetchone()
     return (r[0] or 0, r[1] or 0)
@@ -163,14 +189,14 @@ def get_today_counts(conn, route_id, today_str):
 
 def get_yesterday_min(conn, route_id, today_str):
     """昨日（最近一次有資料的前一天）傳統航空最低價"""
-    cur = conn.execute("""
+    cur = conn.execute(f"""
         SELECT MIN(price_twd) FROM prices
         WHERE route_id = ?
           AND is_lcc = 0
-          AND DATE(scan_ts) < ?
-          AND DATE(scan_ts) >= DATE(?, '-7 day')
-        GROUP BY DATE(scan_ts)
-        ORDER BY DATE(scan_ts) DESC
+          AND {SCAN_DATE_SQL} < ?
+          AND {SCAN_DATE_SQL} >= DATE(?, '-7 day')
+        GROUP BY {SCAN_DATE_SQL}
+        ORDER BY {SCAN_DATE_SQL} DESC
         LIMIT 1
     """, (route_id, today_str, today_str))
     row = cur.fetchone()
@@ -178,7 +204,7 @@ def get_yesterday_min(conn, route_id, today_str):
 
 
 def get_total_today(conn, today_str):
-    cur = conn.execute("SELECT COUNT(*) FROM prices WHERE DATE(scan_ts) = ?", (today_str,))
+    cur = conn.execute(f"SELECT COUNT(*) FROM prices WHERE {SCAN_DATE_SQL} = ?", (today_str,))
     return cur.fetchone()[0]
 
 
@@ -191,6 +217,38 @@ def money(n):
 def signed_money(n):
     sign = '+' if n > 0 else '-'
     return f"{sign}NT$ {abs(int(n)):,}"
+
+def primary_history_stats(a):
+    return a.get('history_stats_90') or a.get('history_stats_30') or {}
+
+def format_history_basis(a, today_min, status):
+    stats = primary_history_stats(a)
+    if (stats.get('count') or 0) < 7:
+        return None, None
+
+    p25 = stats.get('p25')
+    p50 = stats.get('p50')
+    p75 = stats.get('p75')
+    count = stats.get('count', 0)
+    basis = (
+        f"歷史區間：{count} 天樣本｜"
+        f"便宜線 P25 {money(p25)}｜"
+        f"中位 P50 {money(p50)}｜"
+        f"偏貴線 P75 {money(p75)}"
+    )
+
+    gap = None
+    if today_min is not None:
+        if status == 'cheap' and p25 is not None:
+            gap = f"差距：比便宜線低 {money(p25 - today_min)}"
+        elif status == 'good' and p50 is not None:
+            gap = f"差距：比中位數低 {money(p50 - today_min)}"
+        elif status == 'normal' and p25 is not None and p75 is not None:
+            gap = f"差距：落在常見區 {money(p25)} ~ {money(p75)}"
+        elif status == 'expensive' and p75 is not None:
+            gap = f"差距：比偏貴線高 {money(today_min - p75)}"
+
+    return basis, gap
 
 
 def cabin_label(route):
@@ -206,6 +264,28 @@ def format_stops(stops):
 
 def format_date_pair(depart_date, return_date):
     return f"{depart_date} 去，{return_date} 回"
+
+def format_time_short(value):
+    if not value:
+        return '時間不明'
+    raw = ' '.join(str(value).strip().split())
+    if not raw:
+        return '時間不明'
+    time_part = re.split(r'\s+on\s+', raw, maxsplit=1)[0].strip()
+    time_part = re.sub(r'\s*\+\d+$', '', time_part).strip()
+    for fmt in ('%I:%M %p', '%H:%M'):
+        try:
+            return datetime.strptime(time_part, fmt).strftime('%H:%M')
+        except ValueError:
+            pass
+    return time_part or raw
+
+def format_flight_times(depart_time, arrive_time, return_depart_time=None, return_arrive_time=None):
+    outbound = f"去程 {format_time_short(depart_time)}→{format_time_short(arrive_time)}"
+    if return_depart_time or return_arrive_time:
+        inbound = f"回程 {format_time_short(return_depart_time)}→{format_time_short(return_arrive_time)}"
+        return f"{outbound}｜{inbound}"
+    return f"{outbound}｜回程時間待確認"
 
 
 def route_meta(route):
@@ -286,7 +366,7 @@ def build_link_buttons(conn, analyses, routes, today_str):
             continue
         best = get_best_traditional_flight(conn, a['route_id'], today_str)
         if best:
-            airline, dd, rd, _, _, _, dest = best
+            airline, dd, rd, _, _, _, _, dest, _, _ = best
             url = google_flights_url(route, dd, rd, dest)
         else:
             airline = ''
@@ -309,13 +389,17 @@ def analysis_status(a):
 def best_flight_dict(row, route=None):
     if not row:
         return None
-    airline, dd, rd, price, depart_time, stops, dest = row
+    airline, dd, rd, price, depart_time, arrive_time, stops, dest, return_depart_time, return_arrive_time = row
     out = {
         'airline_name': airline,
         'depart_date': dd,
         'return_date': rd,
         'price_twd': price,
         'depart_time': depart_time,
+        'arrive_time': arrive_time,
+        'return_depart_time': return_depart_time,
+        'return_arrive_time': return_arrive_time,
+        'time_summary': format_flight_times(depart_time, arrive_time, return_depart_time, return_arrive_time),
         'stops': stops,
         'destination': dest,
     }
@@ -328,8 +412,11 @@ def best_flight_dict(row, route=None):
 def flight_signature(best, today_min):
     if not best:
         return f"price:{today_min}"
-    airline, dd, rd, price, _, stops, dest = best
-    return '|'.join(str(x) for x in [airline, dd, rd, price, stops, dest])
+    airline, dd, rd, price, depart_time, arrive_time, stops, dest, return_depart_time, return_arrive_time = best
+    return '|'.join(str(x) for x in [
+        airline, dd, rd, price, depart_time, arrive_time, stops, dest,
+        return_depart_time, return_arrive_time,
+    ])
 
 
 def collect_price_events(conn, analyses, routes, today_str, notified_state):
@@ -492,8 +579,9 @@ def build_route_block(conn, a, route, today_str, verbose):
         lcc_top = get_top_flights(conn, a['route_id'], today_str, is_lcc=1, limit=2)
         if lcc_top:
             lines.append("廉航參考：")
-            for i, (an, dd, rd, price, _, stops, _) in enumerate(lcc_top, 1):
-                lines.append(f"{i}. {money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{format_stops(stops)}")
+            for i, (an, dd, rd, price, dep_t, arr_t, stops, _, ret_dep_t, ret_arr_t) in enumerate(lcc_top, 1):
+                times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
+                lines.append(f"{i}. {money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{times}｜{format_stops(stops)}")
             lines.append("提醒：廉航多半未含行李費，先不要直接和傳統航空比。")
         return lines
 
@@ -501,7 +589,12 @@ def build_route_block(conn, a, route, today_str, verbose):
     badge = STATUS_BADGE.get(status, STATUS_LABEL.get(status, status))
     lines.append(f"今日：{money(today_min)}｜{badge}")
     lines.append(f"重點：{STATUS_EXPLAIN.get(status, reason)}")
-    if reason:
+    basis, gap = format_history_basis(a, today_min, status)
+    if basis:
+        lines.append(basis)
+    if gap:
+        lines.append(gap)
+    elif reason:
         lines.append(f"依據：{reason}")
     lines.append(
         f"資料：傳統 {trad_n} 筆｜廉航 {lcc_n} 筆｜歷史 {a['history_count_90']}/7 天"
@@ -522,24 +615,26 @@ def build_route_block(conn, a, route, today_str, verbose):
     if top:
         title = "最低票：" if not verbose else "最低幾組："
         lines.append(title)
-        for i, (an, dd, rd, price, _, stops, _) in enumerate(top, 1):
+        for i, (an, dd, rd, price, dep_t, arr_t, stops, _, ret_dep_t, ret_arr_t) in enumerate(top, 1):
             prefix = f"{i}. " if verbose else ""
-            lines.append(f"{prefix}{money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{format_stops(stops)}")
+            times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
+            lines.append(f"{prefix}{money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{times}｜{format_stops(stops)}")
 
     lcc_top = get_top_flights(conn, a['route_id'], today_str, is_lcc=1, limit=1 if not verbose else 2)
     if lcc_top:
         lines.append("廉航參考：")
-        for i, (an, dd, rd, price, _, stops, _) in enumerate(lcc_top, 1):
-            lines.append(f"{i}. {money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{format_stops(stops)}")
+        for i, (an, dd, rd, price, dep_t, arr_t, stops, _, ret_dep_t, ret_arr_t) in enumerate(lcc_top, 1):
+            times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
+            lines.append(f"{i}. {money(price)}｜{an or '航空公司不明'}｜{dd} → {rd}｜{times}｜{format_stops(stops)}")
 
     lines.append("查票：下方有 Google Flights 按鈕，開啟後會重新查即時價格。")
     return lines
 
 
 def build_full_message(conn, analyses, routes, price_events, anomalies, failures):
-    today = date.today()
+    today = datetime.now(TAIPEI).date()
     today_str = today.isoformat()
-    now_str = datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y-%m-%d %H:%M')
+    now_str = datetime.now(TAIPEI).strftime('%Y-%m-%d %H:%M')
     total_today = get_total_today(conn, today_str)
 
     active = [a for a in analyses if routes.get(a['route_id'])]
@@ -602,20 +697,19 @@ def build_full_message(conn, analyses, routes, price_events, anomalies, failures
 
 
 def next_scheduled_scan_taipei():
-    now = datetime.now(ZoneInfo('Asia/Taipei'))
+    now = datetime.now(TAIPEI)
     for add_days in (0, 1):
         base = now + timedelta(days=add_days)
-        for hour in (9, 21):
-            candidate = base.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if candidate > now:
-                return candidate.strftime('%Y-%m-%d %H:%M 台北時間')
+        candidate = base.replace(hour=9, minute=0, second=0, microsecond=0)
+        if candidate > now:
+            return candidate.strftime('%Y-%m-%d %H:%M 台北時間')
     return ''
 
 
 def build_status_payload(conn, analyses, routes, price_events, anomalies, failures, scrape_state):
-    today_str = date.today().isoformat()
+    today_str = datetime.now(TAIPEI).date().isoformat()
     now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
-    now_tpe = datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y-%m-%d %H:%M')
+    now_tpe = datetime.now(TAIPEI).strftime('%Y-%m-%d %H:%M')
     analysis_by_id = {a['route_id']: a for a in analyses}
     price_event_by_id = {ev['id']: ev for ev in price_events}
     anomaly_by_id = {al['id']: al for al in anomalies}
@@ -740,7 +834,7 @@ def main():
     routes = load_routes()
     conn = sqlite3.connect(DB_PATH)
 
-    today_str = date.today().isoformat()
+    today_str = datetime.now(TAIPEI).date().isoformat()
     notified_state = load_json(NOTIFIED_STATE_JSON, {'routes': {}})
     price_events = collect_price_events(conn, analyses, routes, today_str, notified_state)
     anomalies = collect_anomaly_alerts(conn, analyses, routes, today_str, notified_state)
