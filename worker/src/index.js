@@ -35,7 +35,7 @@ const HELP_TEXT = `機票追蹤 Bot
 • /add 是快速新增：目的地、出發地、日期、天數、艙等、週末、通知
 • 日期可以輸入 10/1-12/31、10月到12月、賞楓、寒假
 • 抵達機場可輸入城市中文名（東京、大阪、首爾、曼谷…）自動轉成 IATA
-• /edit 可改欄位：name / origin / destinations / cabin / dates / duration / weekends / max_price / max_stops / depart_time / return_time / threshold
+• /edit 可改欄位：name / origin / destinations / cabin / dates / duration / weekends / max_price / max_stops / depart_time / threshold
   例：/edit 1 threshold any
   例：/edit 1 max_price 35000
   例：/edit 1 destinations NRT,HND`;
@@ -157,7 +157,6 @@ const ADD_DEFAULTS = {
   active: true,
   max_price_twd: 0,
   depart_time_window: null,
-  return_time_window: null,
   max_stops: 0,
 };
 
@@ -685,6 +684,14 @@ function parseCabinClasses(text) {
   return tokens.map((t) => aliases[t] || CABIN_LABEL_TO_VAL[t] || t.toLowerCase());
 }
 
+function validateSingleCabin(cabins) {
+  const valid = ['economy', 'premium_economy', 'business', 'first'];
+  const bad = cabins.filter((c) => !valid.includes(c));
+  if (bad.length > 0) return `不認識的艙等：${bad.join(',')}（可選經濟艙、豪華經濟、商務艙、頭等艙）`;
+  if (cabins.length !== 1) return '一次只能追蹤一種艙等；要比較豪經和商務，請分成兩條路線。';
+  return null;
+}
+
 function destinationLabel(codes) {
   const list = codes || [];
   for (const code of list) {
@@ -807,11 +814,7 @@ const ADD_STEPS = [
       return parseCabinClasses(v);
     },
     validate: (v) => {
-      const valid = ['economy', 'premium_economy', 'business', 'first'];
-      const bad = v.filter((c) => !valid.includes(c));
-      return bad.length === 0
-        ? null
-        : `不認識的艙等：${bad.join(',')}（可選經濟艙、豪華經濟、商務艙、頭等艙）`;
+      return validateSingleCabin(v);
     },
   },
   {
@@ -1268,7 +1271,6 @@ function formatRouteSummary(r) {
   const cabins = (r.cabin_classes || []).map((c) => CABIN_VAL_TO_LABEL[c] || c).join(', ');
   const dests = (r.destinations || []).join(', ');
   const dep = r.depart_time_window || '不限';
-  const ret = r.return_time_window || '不限';
   const weekendCount = r.must_contain_full_weekends ?? '?';
   return [
     `${activeBadge(r.active)}｜#${r.id ?? '?'} ${r.name}`,
@@ -1276,7 +1278,7 @@ function formatRouteSummary(r) {
     `${cabins}｜${r.trip_duration_days} 天｜跨 ${weekendCount} 週末`,
     `${r.depart_date_range?.start ?? '?'} ~ ${r.depart_date_range?.end ?? '?'}`,
     `轉機：最多 ${r.max_stops ?? 0} 次｜預算：${r.max_price_twd ? 'NT$ ' + r.max_price_twd.toLocaleString() : '不限'}`,
-    `時段：去 ${dep}｜回 ${ret}`,
+    `去程時段：${dep}`,
     `通知：${r.notify_threshold}`,
   ].join('\n');
 }
@@ -1485,9 +1487,7 @@ const EDIT_FIELD_HANDLERS = {
     validate: (v) => {
       const tokens = v.split(/[,，、\s]+/).map((t) => t.trim()).filter(Boolean);
       const vals = tokens.map((t) => CABIN_LABEL_TO_VAL[t] || t.toLowerCase());
-      const valid = ['economy', 'premium_economy', 'business', 'first'];
-      const bad = vals.filter((c) => !valid.includes(c));
-      return bad.length === 0 ? null : `不認識的艙等：${bad.join(',')}`;
+      return validateSingleCabin(vals);
     },
   },
   dates: {
@@ -1552,20 +1552,6 @@ const EDIT_FIELD_HANDLERS = {
         r.depart_time_window = null;
       } else {
         r.depart_time_window = TIME_PRESET_TO_VAL[v] || v.trim();
-      }
-    },
-    validate: (v) => {
-      if (TIME_EMPTY_RE.test(v)) return null;
-      const out = TIME_PRESET_TO_VAL[v] || v.trim();
-      return isTimeWindow(out) ? null : '格式須為 HH:MM-HH:MM 或 skip';
-    },
-  },
-  return_time: {
-    apply: (r, v) => {
-      if (TIME_EMPTY_RE.test(v)) {
-        r.return_time_window = null;
-      } else {
-        r.return_time_window = TIME_PRESET_TO_VAL[v] || v.trim();
       }
     },
     validate: (v) => {
@@ -1657,12 +1643,6 @@ const EDIT_ROUTE_FIELDS = [
     field: 'depart_time',
     label: '改去程時段',
     prompt: '去程出發時段？可選預設或輸入 HH:MM-HH:MM。',
-    keyboard: [['不限'], ['早班 06-12'], ['午班 12-18'], ['晚班 18-24']],
-  },
-  {
-    field: 'return_time',
-    label: '改回程時段',
-    prompt: '回程出發時段？可選預設或輸入 HH:MM-HH:MM。',
     keyboard: [['不限'], ['早班 06-12'], ['午班 12-18'], ['晚班 18-24']],
   },
   {
@@ -1826,9 +1806,6 @@ function routeEditButtons(route) {
     ],
     [
       { text: '改去程時段', callback_data: `edit_field:${id}:depart_time` },
-      { text: '改回程時段', callback_data: `edit_field:${id}:return_time` },
-    ],
-    [
       { text: '回路線面板', callback_data: `route:${id}` },
     ],
   ]);
@@ -1889,7 +1866,6 @@ function formatEditCurrentValue(route, field) {
   if (field === 'max_stops') return `最多 ${route.max_stops ?? 0} 次`;
   if (field === 'max_price') return route.max_price_twd ? `NT$ ${route.max_price_twd.toLocaleString()}` : '不限';
   if (field === 'depart_time') return route.depart_time_window || '不限';
-  if (field === 'return_time') return route.return_time_window || '不限';
   if (field === 'threshold') return route.notify_threshold || '未設定';
   if (field === 'name') return route.name || '未設定';
   return '未設定';

@@ -71,12 +71,15 @@ flight-tracker/
 ├── .gitignore                    ← 排除 data/prices.db, data/analysis.json
 ├── .github/
 │   └── workflows/
+│       ├── ci.yml                ← Push/PR 輕量檢查（不抓票、不發 Telegram）
+│       ├── query.yml             ← /history /best /chart /debug 查詢
 │       └── scrape.yml            ← Actions 排程：cron 0 1 * * *（UTC）
 ├── data/
 │   └── .gitkeep                  ← 空資料夾佔位（prices.db 不入 git）
 ├── scripts/
 │   ├── scrape.py                 ← 主爬蟲（含 reclassify_is_lcc, cleanup_invalid_rows）
 │   ├── analyze.py                ← 百分位分析
+│   ├── download_latest_artifact.py ← 下載最新 Actions artifact 到 data/
 │   └── notify.py                 ← Telegram 推播
 └── worker/
     ├── wrangler.toml             ← Cloudflare Worker 設定（含 KV id）
@@ -118,7 +121,11 @@ flight-tracker/
 - **scrape.py / analyze.py / notify.py 優先讀 json**，沒有才 fallback 到 yaml
 - 第一次 /add 後，routes.json 會被建立，從此 yaml 被忽略
 
-### 4.6 Cloudflare Worker
+### 4.6 艙等與時段限制
+- 一條 route 只追蹤一種艙等；若要比較豪經、商務，請分成兩條 route，避免歷史分位混在一起。
+- 目前只支援 `depart_time_window`（去程起飛時段）過濾；回程時段尚未可靠拆出，不開放設定。
+
+### 4.7 Cloudflare Worker
 - 用 KV 存對話狀態（多輪 /add 用，binding: STATE，ttl: 1800 秒）
 - 用 GitHub API（PAT）讀寫 routes.json
 - 用 GitHub API 觸發 workflow_dispatch
@@ -175,6 +182,12 @@ GitHub PAT 過期日：2026-08-25（90 天從 2026-05-27 起算）。**過期前
 1. https://github.com/yuukilin/flight-tracker/actions → 點任何一次 run
 2. 頁面右上 `Artifacts` 下載 `prices-db-XXXX.zip`
 3. 解壓用 [SQLite Browser](https://sqlitebrowser.org/) 開
+
+或本地下載最新成功 run 的 artifact：
+```bash
+python3 scripts/download_latest_artifact.py
+```
+若 GitHub 要求授權，先設定 `GITHUB_TOKEN` 或 `GH_TOKEN` 後重試。
 
 或本地用 python 看：
 ```bash

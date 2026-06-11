@@ -19,7 +19,6 @@ routes:
     depart_weekdays: null
     max_price_twd: 80000
     depart_time_window: null
-    return_time_window: null
     max_stops: 2
     notify_threshold: "any"   # 測試階段用 any，確保一定推訊息
     created_at: "2026-05-26"
