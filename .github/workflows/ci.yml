@@ -11,12 +11,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Dependency consistency check
+        run: pip check
+
+      - name: Dependency smoke test
+        run: python -c "import fast_flights; import scripts.scrape; import scripts.query"
 
       - name: Python syntax check
         run: python -m py_compile scripts/analyze.py scripts/notify.py scripts/query.py scripts/scrape.py scripts/download_latest_artifact.py scripts/validate_routes.py

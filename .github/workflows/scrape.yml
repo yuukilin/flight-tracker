@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
@@ -23,10 +23,16 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Dependency consistency check
+        run: pip check
+
+      - name: Dependency smoke test
+        run: python -c "import fast_flights; import scripts.scrape"
+
       # ── 從 cache 還原上次的 SQLite（如果有的話）──
       - name: Restore prices DB cache
         id: restore-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             data/prices.db
@@ -55,7 +61,7 @@ jobs:
       # ── 把新版 DB 存回 cache（永遠用 run_id 當 key，每次新增、舊的 LRU 自動清）──
       - name: Save prices DB cache
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             data/prices.db
@@ -68,7 +74,7 @@ jobs:
       # ── 也上傳成 Artifact 作為備援，可以從 Actions 頁面下載 ──
       - name: Upload DB artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: prices-db-${{ github.run_id }}
           path: |

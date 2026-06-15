@@ -1,5 +1,23 @@
-fast-flights>=2.0
-pyyaml>=6.0
-requests>=2.31
-python-dateutil>=2.9
-matplotlib>=3.8
+# Keep versions pinned so scheduled Actions do not change when PyPI publishes
+# new releases. fast-flights 3.0 changed the API used by scripts/scrape.py.
+fast-flights==2.2
+pyyaml==6.0.3
+requests==2.34.2
+python-dateutil==2.9.0.post0
+matplotlib==3.11.0
+certifi==2026.5.20
+charset-normalizer==3.4.7
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.63.0
+idna==3.18
+kiwisolver==1.5.0
+numpy==2.4.6
+packaging==26.2
+pillow==12.2.0
+primp==1.3.1
+protobuf==7.35.1
+pyparsing==3.3.2
+selectolax==0.4.10
+six==1.17.0
+urllib3==2.7.0
