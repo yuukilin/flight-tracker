@@ -1,6 +1,7 @@
 # Keep versions pinned so scheduled Actions do not change when PyPI publishes
 # new releases. fast-flights 3.0 changed the API used by scripts/scrape.py.
 fast-flights==2.2
+typing-extensions==4.15.0
 pyyaml==6.0.3
 requests==2.34.2
 python-dateutil==2.9.0.post0
