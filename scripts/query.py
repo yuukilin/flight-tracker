@@ -477,7 +477,8 @@ def action_debug(rid, chat_id):
         ])
 
     if not DB_PATH.exists():
-        lines.append("資料庫狀態：找不到 prices.db。可能是 cache 尚未建立，或 query workflow 沒有還原到資料庫。")
+        lines.append("資料庫狀態：找不到 prices.db。query workflow 已嘗試還原 cache 與最新 scrape artifact，但仍沒有拿到資料庫。")
+        lines.append("建議：先確認 Flight Price Scrape 最近一次是否成功，且 artifact 名稱為 prices-db-*。")
         send_text(chat_id, '\n'.join(lines))
         return
 

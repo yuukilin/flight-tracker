@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 DEFAULT_REPO = "yuukilin/flight-tracker"
 DEFAULT_WORKFLOW = "Flight Price Scrape"
+DEFAULT_ARTIFACT_PREFIX = "prices-db-"
 
 
 def api_get(url, token=None, accept="application/vnd.github+json"):
@@ -50,12 +51,15 @@ def latest_successful_run(repo, workflow_name, token=None):
     raise RuntimeError(f"找不到成功完成的 {workflow_name} run")
 
 
-def latest_artifact(repo, run_id, token=None):
+def latest_artifact(repo, run_id, token=None, name_prefix=DEFAULT_ARTIFACT_PREFIX):
     url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts"
     artifacts = api_get(url, token).get("artifacts", [])
-    artifacts = [a for a in artifacts if not a.get("expired")]
+    artifacts = [
+        a for a in artifacts
+        if not a.get("expired") and a.get("name", "").startswith(name_prefix)
+    ]
     if not artifacts:
-        raise RuntimeError(f"run {run_id} 沒有可下載的 artifact")
+        raise RuntimeError(f"run {run_id} 沒有可下載的 {name_prefix} artifact")
     artifacts.sort(key=lambda a: a.get("created_at", ""), reverse=True)
     return artifacts[0]
 
@@ -92,6 +96,7 @@ def main():
     parser.add_argument("--workflow", default=DEFAULT_WORKFLOW)
     parser.add_argument("--out", default=str(ROOT / "data"))
     parser.add_argument("--run-id", type=int, default=None)
+    parser.add_argument("--artifact-prefix", default=DEFAULT_ARTIFACT_PREFIX)
     args = parser.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -102,12 +107,16 @@ def main():
             run = {"id": args.run_id, "html_url": f"https://github.com/{args.repo}/actions/runs/{args.run_id}"}
         else:
             run = latest_successful_run(args.repo, args.workflow, token)
-        artifact = latest_artifact(args.repo, run["id"], token)
+        artifact = latest_artifact(args.repo, run["id"], token, args.artifact_prefix)
 
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = Path(tmp) / "artifact.zip"
             download_zip(artifact["archive_download_url"], zip_path, token)
-            extract_data(zip_path, Path(args.out))
+            out_dir = Path(args.out)
+            extract_data(zip_path, out_dir)
+
+        if not (out_dir / "prices.db").exists():
+            raise RuntimeError(f"artifact {artifact['name']} 未包含 prices.db")
 
         print(f"已下載：{artifact['name']}")
         print(f"來源：{run['html_url']}")

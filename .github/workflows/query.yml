@@ -21,6 +21,10 @@ on:
         type: string
         default: '30'
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   query:
     runs-on: ubuntu-latest
@@ -54,6 +58,14 @@ jobs:
           key: prices-db-${{ github.run_id }}
           restore-keys: |
             prices-db-
+
+      - name: Restore latest scrape artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/download_latest_artifact.py || {
+            echo "Artifact download failed; continuing with cache if available."
+          }
 
       - name: Run query
         env:
