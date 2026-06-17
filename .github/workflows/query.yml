@@ -59,13 +59,25 @@ jobs:
           restore-keys: |
             prices-db-
 
-      - name: Restore latest scrape artifact
+      - name: Resolve latest scrape artifact
+        id: latest-scrape
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python scripts/download_latest_artifact.py || {
-            echo "Artifact download failed; continuing with cache if available."
-          }
+        continue-on-error: true
+        run: python scripts/download_latest_artifact.py --resolve-only --github-output
+
+      - name: Restore latest scrape artifact
+        if: steps.latest-scrape.outcome == 'success'
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: ${{ steps.latest-scrape.outputs.artifact_name }}
+          run-id: ${{ steps.latest-scrape.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: data
+
+      - name: Show restored query data
+        run: python -c "from pathlib import Path; p=Path('data/prices.db'); s=Path('data/scrape_state.json'); print(f'prices.db exists={p.exists()} size={p.stat().st_size if p.exists() else 0}'); print(f'scrape_state exists={s.exists()} size={s.stat().st_size if s.exists() else 0}')"
 
       - name: Run query
         env:

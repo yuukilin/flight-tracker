@@ -90,6 +90,15 @@ def extract_data(zip_path, target_dir):
                 shutil.copyfileobj(src, dst)
 
 
+def write_outputs(outputs, output_path=None):
+    output_path = output_path or os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        return
+    with open(output_path, "a", encoding="utf-8") as f:
+        for key, value in outputs.items():
+            f.write(f"{key}={value}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="下載最新 flight-tracker Actions artifact 到 data/")
     parser.add_argument("--repo", default=DEFAULT_REPO)
@@ -97,6 +106,8 @@ def main():
     parser.add_argument("--out", default=str(ROOT / "data"))
     parser.add_argument("--run-id", type=int, default=None)
     parser.add_argument("--artifact-prefix", default=DEFAULT_ARTIFACT_PREFIX)
+    parser.add_argument("--resolve-only", action="store_true")
+    parser.add_argument("--github-output", nargs="?", const="", default=None)
     args = parser.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -108,6 +119,22 @@ def main():
         else:
             run = latest_successful_run(args.repo, args.workflow, token)
         artifact = latest_artifact(args.repo, run["id"], token, args.artifact_prefix)
+
+        outputs = {
+            "run_id": run["id"],
+            "run_url": run["html_url"],
+            "artifact_id": artifact["id"],
+            "artifact_name": artifact["name"],
+        }
+        if args.github_output is not None:
+            write_outputs(outputs, args.github_output or None)
+
+        if args.resolve_only:
+            print(f"latest_run_id={run['id']}")
+            print(f"latest_run_url={run['html_url']}")
+            print(f"artifact_id={artifact['id']}")
+            print(f"artifact_name={artifact['name']}")
+            return
 
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = Path(tmp) / "artifact.zip"

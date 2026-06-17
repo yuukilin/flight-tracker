@@ -89,10 +89,12 @@ def save_state(state):
     with open(STATE_PATH, 'w', encoding='utf-8') as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
-def update_state(state, route_id, written):
+def update_state(state, route_id, written, diagnostics=None):
     info = state.setdefault('routes', {}).setdefault(str(route_id), {})
     info['last_scan_ts'] = datetime.utcnow().isoformat()
     info['last_written'] = written
+    if diagnostics:
+        info['last_diagnostics'] = diagnostics
     if written > 0:
         info['last_success_ts'] = info['last_scan_ts']
         info['consecutive_failures'] = 0
@@ -292,8 +294,10 @@ CABIN_MAP = {
     'first': 'first',
 }
 
-def query_one(origin, dest, depart_date, return_date, cabin):
+def query_one(origin, dest, depart_date, return_date, cabin, diagnostics=None, max_stops=None):
     seat = CABIN_MAP.get(cabin, 'economy')
+    if diagnostics is not None:
+        diagnostics['query_count'] += 1
     try:
         result = get_flights(
             flight_data=[
@@ -303,11 +307,43 @@ def query_one(origin, dest, depart_date, return_date, cabin):
             trip='round-trip',
             seat=seat,
             passengers=Passengers(adults=1, children=0, infants_in_seat=0, infants_on_lap=0),
-            fetch_mode='fallback',
+            fetch_mode='common',
+            max_stops=max_stops,
         )
-        return result.flights
+        flights = result.flights or []
+        if diagnostics is not None:
+            diagnostics['raw_flights'] += len(flights)
+            if not flights and len(diagnostics['no_result_examples']) < 3:
+                diagnostics['no_result_examples'].append({
+                    'origin': origin,
+                    'destination': dest,
+                    'depart_date': depart_date.isoformat(),
+                    'return_date': return_date.isoformat(),
+                    'cabin': cabin,
+                })
+        return flights
     except Exception as e:
-        log.warning(f"查詢失敗 {origin}-{dest} {depart_date}~{return_date} {cabin}: {e}")
+        error_text = ' '.join(str(e).split())
+        short_error = error_text[:500]
+        log.warning(f"查詢失敗 {origin}-{dest} {depart_date}~{return_date} {cabin}: {short_error}")
+        if diagnostics is not None:
+            example = {
+                'origin': origin,
+                'destination': dest,
+                'depart_date': depart_date.isoformat(),
+                'return_date': return_date.isoformat(),
+                'cabin': cabin,
+            }
+            if 'No flights found' in error_text:
+                if len(diagnostics['no_result_examples']) < 3:
+                    diagnostics['no_result_examples'].append(example)
+            else:
+                diagnostics['query_errors'] += 1
+                if len(diagnostics['error_examples']) < 3:
+                    diagnostics['error_examples'].append({
+                        **example,
+                        'error': short_error,
+                    })
         return []
 
 # ─────────── 主流程 ───────────
@@ -315,14 +351,39 @@ def query_one(origin, dest, depart_date, return_date, cabin):
 def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
     if not route.get('active', True):
         log.info(f"路線 #{route['id']} 已暫停，跳過")
-        return 0
+        return 0, {'active': False}
 
     log.info(f"開始路線 #{route['id']}:{route['name']}")
     date_pairs = enumerate_date_pairs(route)
     log.info(f"  合格日期組合：{len(date_pairs)} 個")
+    scan_ts = datetime.utcnow().isoformat()
+    diagnostics = {
+        'scan_ts': scan_ts,
+        'active': True,
+        'date_pairs': len(date_pairs),
+        'query_count': 0,
+        'raw_flights': 0,
+        'written': 0,
+        'query_errors': 0,
+        'destinations': route.get('destinations') or [],
+        'cabins': route.get('cabin_classes') or [],
+        'max_stops': route.get('max_stops', 99),
+        'max_price_twd': route.get('max_price_twd') or 0,
+        'depart_time_window': route.get('depart_time_window'),
+        'skipped': {
+            'no_price': 0,
+            'bad_price': 0,
+            'blank_airline': 0,
+            'too_many_stops': 0,
+            'over_max_price': 0,
+            'outside_depart_time_window': 0,
+        },
+        'no_result_examples': [],
+        'error_examples': [],
+    }
     if not date_pairs:
         log.warning("  沒有合格日期，跳過")
-        return 0
+        return 0, diagnostics
 
     depart_win = parse_time_window(route.get('depart_time_window'))
     max_price = route.get('max_price_twd') or 0
@@ -330,20 +391,25 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
     if max_stops is None:
         max_stops = 99
 
-    scan_ts = datetime.utcnow().isoformat()
     written = 0
 
     for depart_d, return_d in date_pairs:
         for dest in route['destinations']:
             for cabin in route['cabin_classes']:
-                flights = query_one(route['origin'], dest, depart_d, return_d, cabin)
+                query_max_stops = max_stops if max_stops != 99 else None
+                flights = query_one(
+                    route['origin'], dest, depart_d, return_d, cabin,
+                    diagnostics, query_max_stops
+                )
                 for f in flights:
                     try:
                         price_raw = str(getattr(f, 'price', '') or '').strip()
                         if not price_raw:
+                            diagnostics['skipped']['no_price'] += 1
                             continue
                         digits = ''.join(c for c in price_raw if c.isdigit() or c == '.')
                         if not digits:
+                            diagnostics['skipped']['bad_price'] += 1
                             continue
                         price_num = float(digits)
                         if 'NT' in price_raw or 'TWD' in price_raw:
@@ -351,10 +417,12 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
                         else:
                             price = int(price_num * fx_rate)
                     except Exception:
+                        diagnostics['skipped']['bad_price'] += 1
                         continue
 
                     airline = (getattr(f, 'name', '') or '').strip()
                     if not airline:
+                        diagnostics['skipped']['blank_airline'] += 1
                         continue
                     airline_code = airline[:2].upper() if airline else ''
                     is_lcc = is_lcc_flight(airline, airline_code, lcc_codes, lcc_keywords)
@@ -382,10 +450,13 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
                             stops = int(digits) if digits else 0
 
                     if stops > max_stops:
+                        diagnostics['skipped']['too_many_stops'] += 1
                         continue
                     if max_price and price > max_price:
+                        diagnostics['skipped']['over_max_price'] += 1
                         continue
                     if not in_window(depart_time_str, depart_win):
+                        diagnostics['skipped']['outside_depart_time_window'] += 1
                         continue
 
                     days_before = (depart_d - datetime.now(TAIPEI).date()).days
@@ -406,8 +477,9 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
                     written += 1
 
     conn.commit()
+    diagnostics['written'] = written
     log.info(f"  寫入 {written} 筆")
-    return written
+    return written, diagnostics
 
 def main():
     log.info("=" * 60)
@@ -434,8 +506,8 @@ def main():
         if not route.get('active', True):
             log.info(f"路線 #{route['id']} 已暫停，跳過")
             continue
-        written = scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate)
-        update_state(state, route['id'], written)
+        written, diagnostics = scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate)
+        update_state(state, route['id'], written, diagnostics)
         total += written
 
     save_state(state)

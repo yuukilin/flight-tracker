@@ -467,8 +467,55 @@ def action_debug(rid, chat_id):
             f"last_success_ts：{route_state.get('last_success_ts', '無')}",
             f"last_written：{route_state.get('last_written', 0)} 筆",
             f"consecutive_failures：{route_state.get('consecutive_failures', 0)}",
-            "",
         ])
+        diagnostics = route_state.get('last_diagnostics') or {}
+        if diagnostics:
+            lines.extend([
+                "",
+                "抓取摘要",
+                f"合格日期組合：{diagnostics.get('date_pairs', 0)} 個",
+                f"Google Flights 查詢：{diagnostics.get('query_count', 0)} 次",
+                f"Google Flights 原始結果：{diagnostics.get('raw_flights', 0)} 筆",
+                f"寫入資料庫：{diagnostics.get('written', route_state.get('last_written', 0))} 筆",
+                f"查詢錯誤：{diagnostics.get('query_errors', 0)} 次",
+            ])
+            skipped = diagnostics.get('skipped') or {}
+            skip_labels = {
+                'no_price': '無價格',
+                'bad_price': '價格解析失敗',
+                'blank_airline': '航空公司空白',
+                'too_many_stops': '超過轉機限制',
+                'over_max_price': '超過價上限',
+                'outside_depart_time_window': '不在去程時段',
+            }
+            skipped_parts = [
+                f"{label} {skipped.get(key, 0)}"
+                for key, label in skip_labels.items()
+                if skipped.get(key, 0)
+            ]
+            if skipped_parts:
+                lines.append("略過原因：" + "｜".join(skipped_parts))
+            if diagnostics.get('raw_flights', 0) == 0 and diagnostics.get('query_errors', 0) == 0:
+                lines.append("判讀：Google Flights 對這組條件沒有回傳航班，常見原因是該路線/艙等/直飛條件本身沒有可賣結果。")
+            elif diagnostics.get('raw_flights', 0) > 0 and diagnostics.get('written', 0) == 0:
+                lines.append("判讀：Google Flights 有回資料，但全部被條件或資料品質過濾掉。請看略過原因。")
+            examples = diagnostics.get('no_result_examples') or []
+            if examples:
+                lines.append("無結果樣本：")
+                for ex in examples[:3]:
+                    lines.append(
+                        f"- {ex.get('origin')} → {ex.get('destination')}｜{ex.get('cabin')}｜"
+                        f"{ex.get('depart_date')} → {ex.get('return_date')}"
+                    )
+            errors = diagnostics.get('error_examples') or []
+            if errors:
+                lines.append("錯誤樣本：")
+                for ex in errors[:3]:
+                    lines.append(
+                        f"- {ex.get('origin')} → {ex.get('destination')}｜{ex.get('cabin')}｜"
+                        f"{ex.get('depart_date')} → {ex.get('return_date')}｜{ex.get('error')}"
+                    )
+        lines.append("")
     else:
         lines.extend([
             "最近掃描",
