@@ -37,11 +37,12 @@ CABIN_QUERY_LABEL = {
     'first': 'first class',
 }
 
-STARLUX_BOOKING_ROUTES = {
-    ('TPE', 'CTS'),
-    ('CTS', 'TPE'),
+CABIN_LABEL = {
+    'economy': '經濟艙',
+    'premium_economy': '豪華經濟艙',
+    'business': '商務艙',
+    'first': '頭等艙',
 }
-
 
 def load_route(rid):
     if not ROUTES_JSON.exists():
@@ -114,23 +115,11 @@ def google_flights_url(route, depart_date=None, return_date=None, destination=No
     return "https://www.google.com/travel/flights?q=" + quote_plus(query)
 
 
-def starlux_booking_url(route):
-    route = route or {}
-    origin = route.get('origin', '')
-    dest = (route.get('destinations') or [''])[0]
-    if (origin, dest) not in STARLUX_BOOKING_ROUTES:
-        return None
-    return (
-        "https://www.starlux-airlines.com/en-Global/booking/book-flight/search-a-flight"
-        f"?from={quote_plus(origin)}&to={quote_plus(dest)}"
-    )
-
-
 def airline_search_url(airline_name):
     if not airline_name:
         return None
     if 'starlux' in airline_name.lower() or '星宇' in airline_name:
-        return 'https://www.starlux-airlines.com/en-Global'
+        return None
     return "https://www.google.com/search?q=" + quote_plus(f"{airline_name} official site booking")
 
 
@@ -138,9 +127,6 @@ def route_buttons(route, rid, depart_date=None, return_date=None, destination=No
     if not route:
         return None
     row = [{'text': f"#{rid} Google Flights", 'url': google_flights_url(route, depart_date, return_date, destination)}]
-    official_url = starlux_booking_url(route)
-    if official_url:
-        row.append({'text': '星宇官網查票', 'url': official_url})
     return [row]
 
 
@@ -191,6 +177,11 @@ def route_label(route):
         f"{rng.get('start', '?')} 至 {rng.get('end', '?')}｜"
         f"{route.get('trip_duration_days', '?')} 天｜跨 {route.get('must_contain_full_weekends', 0)} 個週末"
     )
+
+
+def cabin_label(route):
+    cabins = route.get('cabin_classes') or []
+    return '、'.join(CABIN_LABEL.get(c, c) for c in cabins) or '未設定'
 
 
 def money(n):
@@ -398,11 +389,8 @@ def action_best(rid, chat_id, limit=5):
         times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
         lines.append(f"{i}. {money(p)}｜{an}｜{dd} → {rd}｜{times}｜{dest}｜{s}")
         row = [{'text': f"第 {i} 筆 Google Flights", 'url': google_flights_url(route, dd, rd, dest)}]
-        official_url = starlux_booking_url(route)
-        if official_url:
-            row.append({'text': '星宇官網查票', 'url': official_url})
         airline_url = airline_search_url(an)
-        if airline_url and airline_url != official_url:
+        if airline_url:
             row.append({'text': '搜尋航空公司官網', 'url': airline_url})
         buttons.append(row)
     lines.append("")
@@ -559,9 +547,11 @@ def action_debug(rid, chat_id):
             if source_issue == 'unclassified_airline':
                 lines.append("判讀：Google 有回價格但航空公司欄位空白，已列為未分類票價；這是來源解析問題，不等於沒票。")
             elif source_issue == 'no_direct_cabin_results':
-                lines.append("判讀：Google 沒回直飛豪經；放寬轉機後有豪經結果，所以問題是直飛艙等條件，不是程式漏撈。")
+                cabin_name = cabin_label(route)
+                lines.append(f"判讀：Google 沒回直飛{cabin_name}；放寬轉機後有{cabin_name}結果，所以問題是直飛艙等條件，不是程式漏撈。")
             elif source_issue == 'no_cabin_results':
-                lines.append("判讀：Google 對豪經連放寬轉機也沒有結果，較像 Google Flights/艙等來源資料不足。")
+                cabin_name = cabin_label(route)
+                lines.append(f"判讀：Google 對{cabin_name}連放寬轉機也沒有結果，較像 Google Flights/艙等來源資料不足。")
             elif raw_flights == 0 and diagnostics.get('query_errors', 0) == 0:
                 lines.append("判讀：Google Flights 對這組條件沒有回傳航班，常見原因是該路線/艙等/直飛條件本身沒有可賣結果。")
             elif raw_flights > 0 and written == 0:

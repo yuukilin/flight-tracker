@@ -96,10 +96,7 @@ CABIN_QUERY_LABEL = {
     'first': 'first class',
 }
 
-STARLUX_BOOKING_ROUTES = {
-    ('TPE', 'CTS'),
-    ('CTS', 'TPE'),
-}
+NORMAL_NO_DATA_ISSUES = {'no_direct_cabin_results', 'no_cabin_results'}
 
 
 def utc_now_iso():
@@ -366,22 +363,11 @@ def google_flights_url(route, depart_date=None, return_date=None, destination=No
     return "https://www.google.com/travel/flights?q=" + quote_plus(query)
 
 
-def starlux_booking_url(route):
-    origin = route.get('origin', '')
-    dest = (route.get('destinations') or [''])[0]
-    if (origin, dest) not in STARLUX_BOOKING_ROUTES:
-        return None
-    return (
-        "https://www.starlux-airlines.com/en-Global/booking/book-flight/search-a-flight"
-        f"?from={quote_plus(origin)}&to={quote_plus(dest)}"
-    )
-
-
 def airline_search_url(airline_name):
     if not airline_name:
         return None
     if 'starlux' in airline_name.lower() or '星宇' in airline_name:
-        return 'https://www.starlux-airlines.com/en-Global'
+        return None
     return "https://www.google.com/search?q=" + quote_plus(f"{airline_name} official site booking")
 
 
@@ -404,11 +390,8 @@ def build_link_buttons(conn, analyses, routes, today_str):
             airline = ''
             url = google_flights_url(route)
         row = [{'text': f"#{a['route_id']} Google Flights", 'url': url}]
-        official_url = starlux_booking_url(route)
-        if official_url:
-            row.append({'text': '星宇官網查票', 'url': official_url})
         airline_url = airline_search_url(airline)
-        if airline_url and airline_url != official_url:
+        if airline_url:
             row.append({'text': '搜尋航空公司官網', 'url': airline_url})
         rows.append(row)
     return rows
@@ -609,17 +592,21 @@ def build_route_block(conn, a, route, today_str, verbose, route_state=None):
 
     today_min = a.get('today_min')
     if today_min is None:
-        lines.append("今日：⚠️ 沒有傳統航空票價")
         source_issue = route_state.get('source_issue')
         diagnostics = route_state.get('last_diagnostics') or route_state.get('last_scrape') or {}
         relaxed = diagnostics.get('relaxed_max_stops') or {}
+        cabin_name = cabin_label(route)
+        if source_issue in NORMAL_NO_DATA_ISSUES:
+            lines.append("今日：⚪ 沒有符合條件票價")
+        else:
+            lines.append("今日：⚠️ 沒有傳統航空票價")
         if source_issue == 'unclassified_airline':
             lines.append("重點：Google 有回價格但航空公司欄位空白，已列為未分類票價；這比較像來源解析問題，不是沒票。")
         elif source_issue == 'no_direct_cabin_results':
             relaxed_count = relaxed.get('raw_flights', 0)
-            lines.append(f"重點：Google 沒回直飛豪經；放寬轉機後有 {relaxed_count} 筆豪經結果，所以問題是「直飛 + 艙等」條件，不是程式沒掃到。")
+            lines.append(f"重點：Google 沒回直飛{cabin_name}；放寬轉機後有 {relaxed_count} 筆{cabin_name}結果，代表目前沒有符合直飛條件的可用資料。")
         elif source_issue == 'no_cabin_results':
-            lines.append("重點：Google 對豪經連放寬轉機也沒回結果，較像 Google Flights/艙等來源資料不足。")
+            lines.append(f"重點：Google 對{cabin_name}連放寬轉機也沒回結果，這是目前來源沒有符合艙等資料，不是價格訊號。")
         elif source_issue == 'no_raw_results':
             lines.append("重點：Google 對這組條件沒有回傳航班；這比較像來源查不到，不是價格訊號。")
         elif source_issue == 'query_errors':
@@ -643,9 +630,6 @@ def build_route_block(conn, a, route, today_str, verbose, route_state=None):
                 times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
                 lines.append(f"{i}. {money(price)}｜{dd} → {rd}｜{times}｜{format_stops(stops)}")
             lines.append("提醒：未分類票價不納入歷史分位，避免把廉航或未知來源誤當傳統航空。")
-        official_url = starlux_booking_url(route)
-        if official_url:
-            lines.append("查票：下方有星宇官網按鈕；Google Flights 異常時以官網為準。")
         lcc_top = get_top_flights(conn, a['route_id'], today_str, is_lcc=1, limit=2)
         if lcc_top:
             lines.append("廉航參考：")
@@ -708,7 +692,16 @@ def build_full_message(conn, analyses, routes, price_events, anomalies, failures
     total_today = get_total_today(conn, today_str)
 
     active = [a for a in analyses if routes.get(a['route_id'])]
-    no_data_n = sum(1 for a in active if a.get('today_min') is None)
+    no_data_n = 0
+    normal_no_data_n = 0
+    for a in active:
+        if a.get('today_min') is not None:
+            continue
+        route_state = (scrape_state.get('routes') or {}).get(str(a['route_id']), {})
+        if route_state.get('source_issue') in NORMAL_NO_DATA_ISSUES:
+            normal_no_data_n += 1
+        else:
+            no_data_n += 1
     event_ids = {ev['id'] for ev in price_events}
 
     priority = priority_profile(price_events, anomalies, failures, no_data_n)
@@ -725,6 +718,8 @@ def build_full_message(conn, analyses, routes, price_events, anomalies, failures
     ]
     if no_data_n:
         lines.append(f"• {no_data_n} 條今天沒有傳統航空票價")
+    if normal_no_data_n:
+        lines.append(f"• {normal_no_data_n} 條沒有符合條件票價（已判定非價格訊號）")
     lines.append("")
 
     # 異常下殺警報（最顯眼，放在最上面）
@@ -834,14 +829,20 @@ def build_status_payload(conn, analyses, routes, price_events, anomalies, failur
             'source_issue': state.get('source_issue'),
             'last_scrape': state.get('last_scrape'),
             'google_flights_url': google_flights_url(route),
-            'starlux_booking_url': starlux_booking_url(route),
             'price_event': price_event_by_id.get(rid),
             'anomaly': anomaly_by_id.get(rid),
             'failure': failure_by_id.get(rid),
         })
 
     active_routes = [r for r in route_items if r['active']]
-    no_data_n = sum(1 for r in active_routes if r['today_min'] is None)
+    no_data_n = sum(
+        1 for r in active_routes
+        if r['today_min'] is None and r.get('source_issue') not in NORMAL_NO_DATA_ISSUES
+    )
+    normal_no_data_n = sum(
+        1 for r in active_routes
+        if r['today_min'] is None and r.get('source_issue') in NORMAL_NO_DATA_ISSUES
+    )
     priority = priority_profile(price_events, anomalies, failures, no_data_n)
 
     return {
@@ -859,6 +860,8 @@ def build_status_payload(conn, analyses, routes, price_events, anomalies, failur
         'price_events': price_events,
         'anomalies': anomalies,
         'failures': failures,
+        'no_data_count': no_data_n,
+        'normal_no_data_count': normal_no_data_n,
     }
 
 
