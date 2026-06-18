@@ -520,11 +520,31 @@ def action_debug(rid, chat_id):
                 lines.append(f"已驗證航班補名：{diagnostics.get('fallback_written')} 筆")
             if diagnostics.get('unclassified_written'):
                 lines.append(f"未分類票價：{diagnostics.get('unclassified_written')} 筆")
+            relaxed = diagnostics.get('relaxed_max_stops') or {}
+            if relaxed:
+                lines.extend([
+                    "放寬轉機診斷",
+                    f"抽樣日期組合：{relaxed.get('tested_date_pairs', 0)} 個",
+                    f"查詢：{relaxed.get('query_count', 0)} 次",
+                    f"原始結果：{relaxed.get('raw_flights', 0)} 筆",
+                    f"其中直飛：{relaxed.get('direct_flights', 0)} 筆",
+                ])
+                sample_flights = relaxed.get('sample_flights') or []
+                if sample_flights:
+                    lines.append("放寬轉機樣本：")
+                    for sample in sample_flights[:3]:
+                        airline = sample.get('airline_name') or '航空公司未解析'
+                        price = sample.get('price') or '價格待確認'
+                        lines.append(
+                            f"- {price}｜{airline}｜{sample.get('depart_date')} → {sample.get('return_date')}｜"
+                            f"{stops_label(sample.get('stops'))}"
+                        )
             skipped = diagnostics.get('skipped') or {}
             skip_labels = {
                 'no_price': '無價格',
                 'bad_price': '價格解析失敗',
                 'blank_airline': '航空公司空白',
+                'unknown_stops': '轉機資訊不明',
                 'too_many_stops': '超過轉機限制',
                 'over_max_price': '超過價上限',
                 'outside_depart_time_window': '不在去程時段',
@@ -538,6 +558,10 @@ def action_debug(rid, chat_id):
                 lines.append("略過原因：" + "｜".join(skipped_parts))
             if source_issue == 'unclassified_airline':
                 lines.append("判讀：Google 有回價格但航空公司欄位空白，已列為未分類票價；這是來源解析問題，不等於沒票。")
+            elif source_issue == 'no_direct_cabin_results':
+                lines.append("判讀：Google 沒回直飛豪經；放寬轉機後有豪經結果，所以問題是直飛艙等條件，不是程式漏撈。")
+            elif source_issue == 'no_cabin_results':
+                lines.append("判讀：Google 對豪經連放寬轉機也沒有結果，較像 Google Flights/艙等來源資料不足。")
             elif raw_flights == 0 and diagnostics.get('query_errors', 0) == 0:
                 lines.append("判讀：Google Flights 對這組條件沒有回傳航班，常見原因是該路線/艙等/直飛條件本身沒有可賣結果。")
             elif raw_flights > 0 and written == 0:

@@ -74,6 +74,17 @@ def run_scrape_with_flights(flights):
     return written, stats, conn
 
 
+def run_scrape_with_query(fake_query_one):
+    conn = make_conn()
+    original_query_one = scrape.query_one
+    scrape.query_one = fake_query_one
+    try:
+        written, stats = scrape.scrape_route(TEST_ROUTE, {'GK'}, ['jetstar'], conn, 32)
+    finally:
+        scrape.query_one = original_query_one
+    return written, stats, conn
+
+
 class BlankAirlineHandlingTest(unittest.TestCase):
     def test_blank_airline_without_verified_time_stays_unclassified(self):
         flight = types.SimpleNamespace(
@@ -138,6 +149,40 @@ class BlankAirlineHandlingTest(unittest.TestCase):
     def test_query_does_not_treat_null_lcc_flag_as_traditional(self):
         self.assertFalse(query.is_traditional_flight(scrape.UNCLASSIFIED_AIRLINE_NAME, '', None, set(), []))
         self.assertTrue(query.is_traditional_flight('STARLUX Airlines', 'JX', 0, set(), []))
+
+    def test_no_direct_cabin_results_keeps_relaxed_stop_diagnostics(self):
+        one_stop_flight = types.SimpleNamespace(
+            price='NT$ 31,036',
+            name='Cathay Pacific',
+            departure='9:15 PM',
+            arrival='2:50 PM',
+            stops=1,
+        )
+
+        def fake_query_one(origin, dest, depart_date, return_date, cabin, diagnostics=None, max_stops=None):
+            if diagnostics is not None:
+                diagnostics['query_count'] += 1
+            if max_stops == 0:
+                if diagnostics is not None:
+                    diagnostics['no_result_examples'].append({
+                        'origin': origin,
+                        'destination': dest,
+                        'depart_date': depart_date.isoformat(),
+                        'return_date': return_date.isoformat(),
+                        'cabin': cabin,
+                    })
+                return []
+            if diagnostics is not None:
+                diagnostics['raw_flights'] += 1
+            return [one_stop_flight]
+
+        written, stats, conn = run_scrape_with_query(fake_query_one)
+
+        self.assertEqual(written, 0)
+        self.assertEqual(stats.get('source_issue'), 'no_direct_cabin_results')
+        self.assertEqual(stats['relaxed_max_stops']['raw_flights'], 1)
+        self.assertEqual(stats['relaxed_max_stops']['direct_flights'], 0)
+        self.assertEqual(conn.execute('SELECT COUNT(*) FROM prices').fetchone()[0], 0)
 
 
 if __name__ == '__main__':

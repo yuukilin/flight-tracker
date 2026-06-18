@@ -57,6 +57,7 @@ KNOWN_DIRECT_FLIGHT_FALLBACKS = {
 }
 
 KNOWN_FALLBACK_CABINS = {'premium_economy', 'business'}
+RELAXED_STOPS_DIAG_LIMIT = 3
 
 
 def utc_now_iso():
@@ -348,10 +349,12 @@ def parse_stops(stops_raw):
     if isinstance(stops_raw, int):
         return stops_raw
     s = str(stops_raw or '').lower()
+    if not s or s in {'unknown', 'none', 'null', '-'}:
+        return None
     if 'nonstop' in s or 'direct' in s:
         return 0
     digits = ''.join(c for c in s if c.isdigit())
-    return int(digits) if digits else 0
+    return int(digits) if digits else None
 
 def bump_skip(stats, reason):
     stats['skipped'][reason] += 1
@@ -369,13 +372,75 @@ def serialize_stats(stats):
 
 def finalize_diagnostics(diagnostics):
     skipped = diagnostics.get('skipped') or {}
-    if diagnostics.get('unclassified_written'):
+    relaxed = diagnostics.get('relaxed_max_stops') or {}
+    if diagnostics.get('written', 0) == 0 and relaxed.get('raw_flights', 0) > 0 and relaxed.get('direct_flights', 0) == 0:
+        diagnostics['source_issue'] = 'no_direct_cabin_results'
+    elif diagnostics.get('unclassified_written'):
         diagnostics['source_issue'] = 'unclassified_airline'
+    elif diagnostics.get('written', 0) == 0 and diagnostics.get('raw_flights', 0) == 0:
+        if relaxed.get('raw_flights', 0) > 0 and relaxed.get('direct_flights', 0) == 0:
+            diagnostics['source_issue'] = 'no_direct_cabin_results'
+        elif relaxed and relaxed.get('raw_flights', 0) == 0:
+            diagnostics['source_issue'] = 'no_cabin_results'
+        elif diagnostics.get('query_errors', 0) > 0:
+            diagnostics['source_issue'] = 'query_errors'
+        else:
+            diagnostics['source_issue'] = 'no_raw_results'
     elif diagnostics.get('written', 0) == 0 and diagnostics.get('raw_flights', 0) > 0 and any(skipped.values()):
         diagnostics['source_issue'] = 'filtered_all_results'
     else:
         diagnostics.pop('source_issue', None)
     return diagnostics
+
+def add_relaxed_max_stops_diagnostics(route, date_pairs, diagnostics):
+    if route.get('max_stops') != 0:
+        return
+    if diagnostics.get('written', 0) > 0:
+        return
+
+    relaxed = {
+        'tested_date_pairs': 0,
+        'query_count': 0,
+        'raw_flights': 0,
+        'direct_flights': 0,
+        'sample_flights': [],
+        'no_result_examples': [],
+        'error_examples': [],
+    }
+    sampled_pairs = date_pairs[:RELAXED_STOPS_DIAG_LIMIT]
+    for depart_d, return_d in sampled_pairs:
+        relaxed['tested_date_pairs'] += 1
+        for dest in route['destinations']:
+            for cabin in route['cabin_classes']:
+                local_diag = {
+                    'query_count': 0,
+                    'raw_flights': 0,
+                    'query_errors': 0,
+                    'no_result_examples': [],
+                    'error_examples': [],
+                }
+                flights = query_one(route['origin'], dest, depart_d, return_d, cabin, local_diag, max_stops=None)
+                relaxed['query_count'] += local_diag['query_count']
+                relaxed['raw_flights'] += local_diag['raw_flights']
+                relaxed['no_result_examples'].extend(local_diag['no_result_examples'])
+                relaxed['error_examples'].extend(local_diag['error_examples'])
+                for f in flights:
+                    stops = parse_stops(getattr(f, 'stops', 0))
+                    if stops == 0:
+                        relaxed['direct_flights'] += 1
+                    if len(relaxed['sample_flights']) < 3:
+                        relaxed['sample_flights'].append({
+                            'depart_date': depart_d.isoformat(),
+                            'return_date': return_d.isoformat(),
+                            'destination': dest,
+                            'cabin': cabin,
+                            'airline_name': (getattr(f, 'name', '') or '').strip(),
+                            'price': getattr(f, 'price', '') or '',
+                            'depart_time': getattr(f, 'departure', '') or '',
+                            'arrive_time': getattr(f, 'arrival', '') or '',
+                            'stops': stops,
+                        })
+    diagnostics['relaxed_max_stops'] = relaxed
 
 def same_time(observed, expected):
     if not observed:
@@ -503,6 +568,7 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
             'no_price': 0,
             'bad_price': 0,
             'blank_airline': 0,
+            'unknown_stops': 0,
             'too_many_stops': 0,
             'over_max_price': 0,
             'outside_depart_time_window': 0,
@@ -560,7 +626,10 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
 
                     stops = parse_stops(getattr(f, 'stops', 0))
 
-                    if stops > max_stops:
+                    if stops is None and max_stops != 99:
+                        diagnostics['skipped']['unknown_stops'] += 1
+                        continue
+                    if stops is not None and stops > max_stops:
                         diagnostics['skipped']['too_many_stops'] += 1
                         continue
                     if max_price and price > max_price:
@@ -619,6 +688,8 @@ def scrape_route(route, lcc_codes, lcc_keywords, conn, fx_rate):
                     ))
                     written += 1
                     diagnostics['written'] += 1
+
+    add_relaxed_max_stops_diagnostics(route, date_pairs, diagnostics)
 
     conn.commit()
     log.info(f"  寫入 {written} 筆")

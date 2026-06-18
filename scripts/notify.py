@@ -611,11 +611,31 @@ def build_route_block(conn, a, route, today_str, verbose, route_state=None):
     if today_min is None:
         lines.append("今日：⚠️ 沒有傳統航空票價")
         source_issue = route_state.get('source_issue')
+        diagnostics = route_state.get('last_diagnostics') or route_state.get('last_scrape') or {}
+        relaxed = diagnostics.get('relaxed_max_stops') or {}
         if source_issue == 'unclassified_airline':
             lines.append("重點：Google 有回價格但航空公司欄位空白，已列為未分類票價；這比較像來源解析問題，不是沒票。")
+        elif source_issue == 'no_direct_cabin_results':
+            relaxed_count = relaxed.get('raw_flights', 0)
+            lines.append(f"重點：Google 沒回直飛豪經；放寬轉機後有 {relaxed_count} 筆豪經結果，所以問題是「直飛 + 艙等」條件，不是程式沒掃到。")
+        elif source_issue == 'no_cabin_results':
+            lines.append("重點：Google 對豪經連放寬轉機也沒回結果，較像 Google Flights/艙等來源資料不足。")
+        elif source_issue == 'no_raw_results':
+            lines.append("重點：Google 對這組條件沒有回傳航班；這比較像來源查不到，不是價格訊號。")
+        elif source_issue == 'query_errors':
+            lines.append("重點：Google 查詢發生錯誤，請用 /debug 看錯誤樣本。")
         else:
             lines.append("重點：這不是便宜或偏貴，而是資料不足；若連續出現再用 /debug 檢查。")
         lines.append(f"資料：傳統 {trad_n} 筆｜廉航 {lcc_n} 筆｜未分類 {unknown_n} 筆")
+        sample_flights = relaxed.get('sample_flights') or []
+        if source_issue == 'no_direct_cabin_results' and sample_flights:
+            lines.append("放寬轉機樣本：")
+            for i, sample in enumerate(sample_flights[:2], 1):
+                airline = sample.get('airline_name') or '航空公司未解析'
+                price = sample.get('price') or '價格待確認'
+                stops = format_stops(sample.get('stops'))
+                lines.append(f"{i}. {price}｜{airline}｜{sample.get('depart_date')} → {sample.get('return_date')}｜{stops}")
+            lines.append("提醒：這些不符合本路線的直飛設定，所以不納入歷史分位。")
         unknown_top = get_top_flights(conn, a['route_id'], today_str, is_lcc=None, limit=2)
         if unknown_top:
             lines.append("未分類票價：")
