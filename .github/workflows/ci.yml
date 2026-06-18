@@ -31,6 +31,9 @@ jobs:
       - name: Python syntax check
         run: python -m py_compile scripts/analyze.py scripts/notify.py scripts/query.py scripts/scrape.py scripts/download_latest_artifact.py scripts/validate_routes.py
 
+      - name: Blank airline handling test
+        run: python scripts/test_blank_airline_handling.py
+
       - name: JSON config check
         run: |
           python -m json.tool routes.json >/dev/null

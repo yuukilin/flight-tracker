@@ -37,6 +37,11 @@ CABIN_QUERY_LABEL = {
     'first': 'first class',
 }
 
+STARLUX_BOOKING_ROUTES = {
+    ('TPE', 'CTS'),
+    ('CTS', 'TPE'),
+}
+
 
 def load_route(rid):
     if not ROUTES_JSON.exists():
@@ -89,6 +94,8 @@ def is_lcc_flight(airline_name, airline_code, lcc_codes, lcc_keywords):
 
 
 def is_traditional_flight(airline_name, airline_code, is_lcc, lcc_codes, lcc_keywords):
+    if is_lcc is None:
+        return False
     if is_lcc:
         return False
     return not is_lcc_flight(airline_name or '', airline_code or '', lcc_codes, lcc_keywords)
@@ -107,10 +114,34 @@ def google_flights_url(route, depart_date=None, return_date=None, destination=No
     return "https://www.google.com/travel/flights?q=" + quote_plus(query)
 
 
+def starlux_booking_url(route):
+    route = route or {}
+    origin = route.get('origin', '')
+    dest = (route.get('destinations') or [''])[0]
+    if (origin, dest) not in STARLUX_BOOKING_ROUTES:
+        return None
+    return (
+        "https://www.starlux-airlines.com/en-Global/booking/book-flight/search-a-flight"
+        f"?from={quote_plus(origin)}&to={quote_plus(dest)}"
+    )
+
+
 def airline_search_url(airline_name):
     if not airline_name:
         return None
+    if 'starlux' in airline_name.lower() or '星宇' in airline_name:
+        return 'https://www.starlux-airlines.com/en-Global'
     return "https://www.google.com/search?q=" + quote_plus(f"{airline_name} official site booking")
+
+
+def route_buttons(route, rid, depart_date=None, return_date=None, destination=None):
+    if not route:
+        return None
+    row = [{'text': f"#{rid} Google Flights", 'url': google_flights_url(route, depart_date, return_date, destination)}]
+    official_url = starlux_booking_url(route)
+    if official_url:
+        row.append({'text': '星宇官網查票', 'url': official_url})
+    return [row]
 
 
 def send_text(chat_id, text, buttons=None):
@@ -290,7 +321,7 @@ def action_history(rid, days, chat_id):
         counts[d] = counts.get(d, 0) + 1
 
     if not daily:
-        buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
+        buttons = route_buttons(route, rid)
         send_text(
             chat_id,
             f"📈 #{rid} {name}｜每日最低\n\n一句話：過去 {days} 天沒有傳統航空資料。\n建議：先開 Google Flights 或跑 /debug {rid} 檢查抓取狀態。",
@@ -312,7 +343,7 @@ def action_history(rid, days, chat_id):
         lines.append(f"{d}：NT$ {daily[d]:,}（{counts[d]} 筆）")
     lines.append("")
     lines.append("查票：下方按鈕會開 Google Flights 重新查即時價格。")
-    buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
+    buttons = route_buttons(route, rid)
     send_text(chat_id, '\n'.join(lines), buttons=buttons)
 
 
@@ -367,8 +398,11 @@ def action_best(rid, chat_id, limit=5):
         times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
         lines.append(f"{i}. {money(p)}｜{an}｜{dd} → {rd}｜{times}｜{dest}｜{s}")
         row = [{'text': f"第 {i} 筆 Google Flights", 'url': google_flights_url(route, dd, rd, dest)}]
+        official_url = starlux_booking_url(route)
+        if official_url:
+            row.append({'text': '星宇官網查票', 'url': official_url})
         airline_url = airline_search_url(an)
-        if airline_url:
+        if airline_url and airline_url != official_url:
             row.append({'text': '搜尋航空公司官網', 'url': airline_url})
         buttons.append(row)
     lines.append("")
@@ -412,7 +446,7 @@ def action_chart(rid, days, chat_id):
         daily[d] = min(price, daily.get(d, price))
 
     if not daily:
-        buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
+        buttons = route_buttons(route, rid)
         send_text(chat_id, f"📉 #{rid} {name}｜走勢圖\n\n一句話：過去 {days} 天沒有傳統航空資料可畫。", buttons=buttons)
         return
 
@@ -433,7 +467,7 @@ def action_chart(rid, days, chat_id):
     plt.close(fig)
 
     caption = f"📉 #{rid} {name}｜走勢圖\n過去 {days} 天最低價（傳統航空）"
-    buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]] if route else None
+    buttons = route_buttons(route, rid)
     send_photo(chat_id, out, caption=caption, buttons=buttons)
 
 
@@ -468,17 +502,24 @@ def action_debug(rid, chat_id):
             f"last_written：{route_state.get('last_written', 0)} 筆",
             f"consecutive_failures：{route_state.get('consecutive_failures', 0)}",
         ])
-        diagnostics = route_state.get('last_diagnostics') or {}
+        diagnostics = route_state.get('last_diagnostics') or route_state.get('last_scrape') or {}
         if diagnostics:
+            raw_flights = diagnostics.get('raw_flights', diagnostics.get('raw_results', 0))
+            written = diagnostics.get('written', route_state.get('last_written', 0))
+            source_issue = route_state.get('source_issue') or diagnostics.get('source_issue')
             lines.extend([
                 "",
                 "抓取摘要",
-                f"合格日期組合：{diagnostics.get('date_pairs', 0)} 個",
-                f"Google Flights 查詢：{diagnostics.get('query_count', 0)} 次",
-                f"Google Flights 原始結果：{diagnostics.get('raw_flights', 0)} 筆",
-                f"寫入資料庫：{diagnostics.get('written', route_state.get('last_written', 0))} 筆",
+                f"合格日期組合：{diagnostics.get('date_pairs', diagnostics.get('eligible_date_pairs', 0))} 個",
+                f"Google Flights 查詢：{diagnostics.get('query_count', diagnostics.get('queries', 0))} 次",
+                f"Google Flights 原始結果：{raw_flights} 筆",
+                f"寫入資料庫：{written} 筆",
                 f"查詢錯誤：{diagnostics.get('query_errors', 0)} 次",
             ])
+            if diagnostics.get('fallback_written'):
+                lines.append(f"已驗證航班補名：{diagnostics.get('fallback_written')} 筆")
+            if diagnostics.get('unclassified_written'):
+                lines.append(f"未分類票價：{diagnostics.get('unclassified_written')} 筆")
             skipped = diagnostics.get('skipped') or {}
             skip_labels = {
                 'no_price': '無價格',
@@ -495,11 +536,13 @@ def action_debug(rid, chat_id):
             ]
             if skipped_parts:
                 lines.append("略過原因：" + "｜".join(skipped_parts))
-            if diagnostics.get('raw_flights', 0) == 0 and diagnostics.get('query_errors', 0) == 0:
+            if source_issue == 'unclassified_airline':
+                lines.append("判讀：Google 有回價格但航空公司欄位空白，已列為未分類票價；這是來源解析問題，不等於沒票。")
+            elif raw_flights == 0 and diagnostics.get('query_errors', 0) == 0:
                 lines.append("判讀：Google Flights 對這組條件沒有回傳航班，常見原因是該路線/艙等/直飛條件本身沒有可賣結果。")
-            elif diagnostics.get('raw_flights', 0) > 0 and diagnostics.get('written', 0) == 0:
+            elif raw_flights > 0 and written == 0:
                 lines.append("判讀：Google Flights 有回資料，但全部被條件或資料品質過濾掉。請看略過原因。")
-            examples = diagnostics.get('no_result_examples') or []
+            examples = diagnostics.get('no_result_examples') or diagnostics.get('sample_no_results') or []
             if examples:
                 lines.append("無結果樣本：")
                 for ex in examples[:3]:
@@ -562,13 +605,16 @@ def action_debug(rid, chat_id):
 
     traditional = []
     lcc = []
+    unclassified = []
     blank_airline = 0
     for price, airline_name, airline_code, dd, rd, dest, stops, is_lcc, origin, cabin, dep_t, arr_t, ret_dep_t, ret_arr_t in rows:
         if not (airline_name or '').strip():
             blank_airline += 1
             continue
         item = (price, airline_name, airline_code, dd, rd, dest, stops, origin, cabin, dep_t, arr_t, ret_dep_t, ret_arr_t)
-        if is_traditional_flight(airline_name, airline_code, is_lcc, lcc_codes, lcc_keywords):
+        if is_lcc is None:
+            unclassified.append(item)
+        elif is_traditional_flight(airline_name, airline_code, is_lcc, lcc_codes, lcc_keywords):
             traditional.append(item)
         else:
             lcc.append(item)
@@ -580,6 +626,7 @@ def action_debug(rid, chat_id):
         f"總筆數：{len(rows)} 筆",
         f"傳統航空：{len(traditional)} 筆",
         f"廉航：{len(lcc)} 筆",
+        f"未分類：{len(unclassified)} 筆",
     ])
     if blank_airline:
         lines.append(f"航空公司空白：{blank_airline} 筆（已排除在最低票清單外）")
@@ -614,14 +661,24 @@ def action_debug(rid, chat_id):
         lines.append("提醒：廉航通常未含行李費，僅供參考。")
         lines.append("")
 
+    if unclassified:
+        lines.append("未分類票價 3 筆")
+        for i, (price, airline_name, _, dd, rd, dest, stops, _, cabin, dep_t, arr_t, ret_dep_t, ret_arr_t) in enumerate(unique_price_rows(unclassified, 3), 1):
+            times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
+            lines.append(f"{i}. {money(price)}｜{dd} 去，{rd} 回｜{times}｜{dest}｜{cabin}｜{stops_label(stops)}")
+        lines.append("提醒：未分類票價保留為查票線索，不納入傳統航空歷史分位。")
+        lines.append("")
+
     lines.append("判讀")
     if traditional:
         lines.append("如果實際分布的出發地、目的地、艙等都和設定一致，代表抓取方向是對的。")
         lines.append("價格仍需點 Google Flights 重新查價確認，因為 Google 會即時更新可訂位與票價。")
+    elif unclassified:
+        lines.append("Google 有回票價但沒有航空公司欄位，所以目前只能當查票線索，不能直接當價格訊號。")
     else:
         lines.append("如果總筆數很多但傳統航空為 0，通常是航空公司分類或搜尋結果本身需要檢查。")
 
-    buttons = [[{'text': f"#{rid} 開 Google Flights", 'url': google_flights_url(route)}]]
+    buttons = route_buttons(route, rid)
     send_text(chat_id, '\n'.join(lines), buttons=buttons)
 
 

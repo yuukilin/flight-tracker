@@ -20,7 +20,7 @@ import yaml
 import requests
 import sqlite3
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import logging
 from urllib.parse import quote_plus
@@ -96,6 +96,19 @@ CABIN_QUERY_LABEL = {
     'first': 'first class',
 }
 
+STARLUX_BOOKING_ROUTES = {
+    ('TPE', 'CTS'),
+    ('CTS', 'TPE'),
+}
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def utc_now_z():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
 
 # ─────────── 讀檔 ───────────
 
@@ -148,6 +161,11 @@ def get_top_flights(conn, route_id, today_str, is_lcc, limit=3):
     cols = price_columns(conn)
     return_depart_expr = "return_depart_time" if "return_depart_time" in cols else "NULL"
     return_arrive_expr = "return_arrive_time" if "return_arrive_time" in cols else "NULL"
+    lcc_filter = "is_lcc IS NULL" if is_lcc is None else "is_lcc = ?"
+    params = [route_id, today_str]
+    if is_lcc is not None:
+        params.append(is_lcc)
+    params.append(limit)
     cur = conn.execute(f"""
         SELECT airline_name, depart_date, return_date, price_twd,
                depart_time, arrive_time, stops, destination,
@@ -165,12 +183,12 @@ def get_top_flights(conn, route_id, today_str, is_lcc, limit=3):
             FROM prices
             WHERE route_id = ?
               AND {SCAN_DATE_SQL} = ?
-              AND is_lcc = ?
+              AND {lcc_filter}
         )
         WHERE rn = 1
         ORDER BY price_twd ASC, COALESCE(depart_time, ''), airline_name
         LIMIT ?
-    """, (route_id, today_str, is_lcc, limit))
+    """, params)
     return cur.fetchall()
 
 
@@ -178,13 +196,14 @@ def get_today_counts(conn, route_id, today_str):
     cur = conn.execute(f"""
         SELECT
             SUM(CASE WHEN is_lcc = 0 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN is_lcc = 1 THEN 1 ELSE 0 END)
+            SUM(CASE WHEN is_lcc = 1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN is_lcc IS NULL THEN 1 ELSE 0 END)
         FROM prices
         WHERE route_id = ?
           AND {SCAN_DATE_SQL} = ?
     """, (route_id, today_str))
     r = cur.fetchone()
-    return (r[0] or 0, r[1] or 0)
+    return (r[0] or 0, r[1] or 0, r[2] or 0)
 
 
 def get_yesterday_min(conn, route_id, today_str):
@@ -347,9 +366,22 @@ def google_flights_url(route, depart_date=None, return_date=None, destination=No
     return "https://www.google.com/travel/flights?q=" + quote_plus(query)
 
 
+def starlux_booking_url(route):
+    origin = route.get('origin', '')
+    dest = (route.get('destinations') or [''])[0]
+    if (origin, dest) not in STARLUX_BOOKING_ROUTES:
+        return None
+    return (
+        "https://www.starlux-airlines.com/en-Global/booking/book-flight/search-a-flight"
+        f"?from={quote_plus(origin)}&to={quote_plus(dest)}"
+    )
+
+
 def airline_search_url(airline_name):
     if not airline_name:
         return None
+    if 'starlux' in airline_name.lower() or '星宇' in airline_name:
+        return 'https://www.starlux-airlines.com/en-Global'
     return "https://www.google.com/search?q=" + quote_plus(f"{airline_name} official site booking")
 
 
@@ -362,7 +394,7 @@ def build_link_buttons(conn, analyses, routes, today_str):
     rows = []
     for a in analyses:
         route = routes.get(a['route_id'])
-        if not route or a.get('today_min') is None:
+        if not route:
             continue
         best = get_best_traditional_flight(conn, a['route_id'], today_str)
         if best:
@@ -372,8 +404,11 @@ def build_link_buttons(conn, analyses, routes, today_str):
             airline = ''
             url = google_flights_url(route)
         row = [{'text': f"#{a['route_id']} Google Flights", 'url': url}]
+        official_url = starlux_booking_url(route)
+        if official_url:
+            row.append({'text': '星宇官網查票', 'url': official_url})
         airline_url = airline_search_url(airline)
-        if airline_url:
+        if airline_url and airline_url != official_url:
             row.append({'text': '搜尋航空公司官網', 'url': airline_url})
         rows.append(row)
     return rows
@@ -540,7 +575,7 @@ def collect_failure_alerts(state, routes, notified_state):
 
 
 def update_notified_state(notified_state, price_events, anomalies, failures):
-    now = datetime.utcnow().isoformat()
+    now = utc_now_iso()
     routes = notified_state.setdefault('routes', {})
     for ev in price_events:
         info = routes.setdefault(str(ev['id']), {})
@@ -560,22 +595,37 @@ def update_notified_state(notified_state, price_events, anomalies, failures):
     notified_state['updated_at_utc'] = now
 
 
-def build_route_block(conn, a, route, today_str, verbose):
+def build_route_block(conn, a, route, today_str, verbose, route_state=None):
     """單條路線一段：固定成「今日、重點、資料、最低票」格式。"""
     lines = []
     name = route.get('name', a.get('route_name', f"#{a['route_id']}"))
+    route_state = route_state or {}
 
     lines.append("────────────")
     lines.append(f"#{a['route_id']} {name}")
     lines.append(route_meta(route))
 
-    trad_n, lcc_n = get_today_counts(conn, a['route_id'], today_str)
+    trad_n, lcc_n, unknown_n = get_today_counts(conn, a['route_id'], today_str)
 
     today_min = a.get('today_min')
     if today_min is None:
         lines.append("今日：⚠️ 沒有傳統航空票價")
-        lines.append("重點：這不是便宜或偏貴，而是資料不足；若連續出現再用 /debug 檢查。")
-        lines.append(f"資料：傳統 {trad_n} 筆｜廉航 {lcc_n} 筆")
+        source_issue = route_state.get('source_issue')
+        if source_issue == 'unclassified_airline':
+            lines.append("重點：Google 有回價格但航空公司欄位空白，已列為未分類票價；這比較像來源解析問題，不是沒票。")
+        else:
+            lines.append("重點：這不是便宜或偏貴，而是資料不足；若連續出現再用 /debug 檢查。")
+        lines.append(f"資料：傳統 {trad_n} 筆｜廉航 {lcc_n} 筆｜未分類 {unknown_n} 筆")
+        unknown_top = get_top_flights(conn, a['route_id'], today_str, is_lcc=None, limit=2)
+        if unknown_top:
+            lines.append("未分類票價：")
+            for i, (an, dd, rd, price, dep_t, arr_t, stops, _, ret_dep_t, ret_arr_t) in enumerate(unknown_top, 1):
+                times = format_flight_times(dep_t, arr_t, ret_dep_t, ret_arr_t)
+                lines.append(f"{i}. {money(price)}｜{dd} → {rd}｜{times}｜{format_stops(stops)}")
+            lines.append("提醒：未分類票價不納入歷史分位，避免把廉航或未知來源誤當傳統航空。")
+        official_url = starlux_booking_url(route)
+        if official_url:
+            lines.append("查票：下方有星宇官網按鈕；Google Flights 異常時以官網為準。")
         lcc_top = get_top_flights(conn, a['route_id'], today_str, is_lcc=1, limit=2)
         if lcc_top:
             lines.append("廉航參考：")
@@ -597,7 +647,7 @@ def build_route_block(conn, a, route, today_str, verbose):
     elif reason:
         lines.append(f"依據：{reason}")
     lines.append(
-        f"資料：傳統 {trad_n} 筆｜廉航 {lcc_n} 筆｜歷史 {a['history_count_90']}/7 天"
+        f"資料：傳統 {trad_n} 筆｜廉航 {lcc_n} 筆｜未分類 {unknown_n} 筆｜歷史 {a['history_count_90']}/7 天"
     )
 
     yest = get_yesterday_min(conn, a['route_id'], today_str)
@@ -631,7 +681,7 @@ def build_route_block(conn, a, route, today_str, verbose):
     return lines
 
 
-def build_full_message(conn, analyses, routes, price_events, anomalies, failures):
+def build_full_message(conn, analyses, routes, price_events, anomalies, failures, scrape_state):
     today = datetime.now(TAIPEI).date()
     today_str = today.isoformat()
     now_str = datetime.now(TAIPEI).strftime('%Y-%m-%d %H:%M')
@@ -688,7 +738,8 @@ def build_full_message(conn, analyses, routes, price_events, anomalies, failures
         route = routes[a['route_id']]
         # 異常下殺的路線一律展開細節，方便看
         verbose = a['route_id'] in event_ids or any(al['id'] == a['route_id'] for al in anomalies)
-        lines.extend(build_route_block(conn, a, route, today_str, verbose=verbose))
+        route_state = (scrape_state.get('routes') or {}).get(str(a['route_id']), {})
+        lines.extend(build_route_block(conn, a, route, today_str, verbose=verbose, route_state=route_state))
         lines.append("")
 
     lines.append("備註：Google Flights 會重新查即時價格；實際票價與可訂位狀態以頁面為準。")
@@ -708,7 +759,7 @@ def next_scheduled_scan_taipei():
 
 def build_status_payload(conn, analyses, routes, price_events, anomalies, failures, scrape_state):
     today_str = datetime.now(TAIPEI).date().isoformat()
-    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+    now_utc = utc_now_z()
     now_tpe = datetime.now(TAIPEI).strftime('%Y-%m-%d %H:%M')
     analysis_by_id = {a['route_id']: a for a in analyses}
     price_event_by_id = {ev['id']: ev for ev in price_events}
@@ -721,7 +772,7 @@ def build_status_payload(conn, analyses, routes, price_events, anomalies, failur
         route = routes[rid]
         a = analysis_by_id.get(rid)
         state = (scrape_state.get('routes') or {}).get(str(rid), {})
-        trad_n, lcc_n = get_today_counts(conn, rid, today_str)
+        trad_n, lcc_n, unknown_n = get_today_counts(conn, rid, today_str)
         status = None
         reason = ''
         today_min = None
@@ -753,13 +804,17 @@ def build_status_payload(conn, analyses, routes, price_events, anomalies, failur
             'reason': reason,
             'traditional_count': trad_n,
             'lcc_count': lcc_n,
+            'unclassified_count': unknown_n,
             'history_counts': history_counts,
             'best_flight': best,
             'last_scan_ts': state.get('last_scan_ts'),
             'last_success_ts': state.get('last_success_ts'),
             'last_written': state.get('last_written', 0),
             'consecutive_failures': state.get('consecutive_failures', 0),
+            'source_issue': state.get('source_issue'),
+            'last_scrape': state.get('last_scrape'),
             'google_flights_url': google_flights_url(route),
+            'starlux_booking_url': starlux_booking_url(route),
             'price_event': price_event_by_id.get(rid),
             'anomaly': anomaly_by_id.get(rid),
             'failure': failure_by_id.get(rid),
@@ -852,7 +907,7 @@ def main():
         conn.close()
         return
 
-    msg = build_full_message(conn, analyses, routes, price_events, anomalies, failures)
+    msg = build_full_message(conn, analyses, routes, price_events, anomalies, failures, state)
     buttons = build_link_buttons(conn, analyses, routes, today_str)
     conn.close()
     if msg:
